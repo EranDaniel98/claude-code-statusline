@@ -22,8 +22,9 @@ except Exception:
 
 
 # Mirror watcher.py thresholds so the two surfaces classify identically.
-SLOW_THRESHOLD = 60.0
-STUCK_THRESHOLD = 180.0
+# Override via env vars CLAUDE_WATCHER_SLOW_SECONDS / CLAUDE_WATCHER_STUCK_SECONDS.
+SLOW_THRESHOLD = float(os.environ.get("CLAUDE_WATCHER_SLOW_SECONDS", "60"))
+STUCK_THRESHOLD = float(os.environ.get("CLAUDE_WATCHER_STUCK_SECONDS", "180"))
 
 
 def ansi(text: str, code: str) -> str:

@@ -96,11 +96,35 @@ The tray icon is a single colored circle whose color = the loudest severity acro
 
 **Tooltip** lists each session's classification. When a terminal window is the OS foreground, the most-recently-active session is sorted to the top with a `▶` marker — proxy for "the session you're probably looking at" (we can't read which tab inside Windows Terminal is active without UI Automation).
 
-**Quit** — right-click → `Quit`.
+**Right-click menu** — each session is clickable; clicking brings that session's terminal window to the foreground. Windows Terminal hosts all tabs in one HWND, so this focuses the WT window — you may still need to switch tabs manually if multiple Claude windows live in the same WT. Plus a `Quit` item to exit the watcher.
 
-**Beeps** on STUCK/WAIT escalations same as the TUI mode (use `--no-sound` to silence).
+**Toast on escalation** — when a session crosses into `⚠ STUCK` or `▶ WAIT`, the watcher fires a desktop toast (`[project] STUCK` or `[project] WAIT`) in addition to the audible beep. Same backend per platform: WinRT on Windows, `osascript` on macOS, `notify-send` on Linux.
 
-On Windows, launch with `pythonw.exe` instead of `python.exe` to suppress the parent terminal window:
+**Beeps** on STUCK/WAIT escalations (use `--no-sound` to silence).
+
+### Autostart on login
+
+Register the tray watcher to launch automatically:
+```bash
+.venv/Scripts/python watcher.py --install-autostart   # Windows: HKCU…\Run
+.venv/bin/python  watcher.py --install-autostart      # macOS: ~/Library/LaunchAgents/*.plist
+                                                       # Linux: ~/.config/autostart/*.desktop
+```
+
+To remove: `python watcher.py --uninstall-autostart`. On Windows the registration uses `pythonw.exe` if present so no console window appears on login.
+
+### Configurable thresholds
+
+Override the classification thresholds via env vars (same vars read by `statusline.py` so the two surfaces never disagree):
+
+| Env var | Default | Effect |
+|---|---|---|
+| `CLAUDE_WATCHER_SLOW_SECONDS`  | `60`  | Age at which a busy session flips to `⌛ THINK` (yellow) |
+| `CLAUDE_WATCHER_STUCK_SECONDS` | `180` | Age at which it flips to `⚠ STUCK` (red) |
+
+### Manual launch on Windows
+
+If you don't use autostart, launch with `pythonw.exe` so no console window appears:
 ```
 .venv/Scripts/pythonw watcher.py --tray
 ```

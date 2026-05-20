@@ -37,8 +37,10 @@ except Exception:
     pass
 
 
-STUCK_THRESHOLD = 180.0
-SLOW_THRESHOLD = 60.0
+# Thresholds override-able via env vars so users can tune without editing source.
+# Defaults match the historical 60s/180s behavior.
+SLOW_THRESHOLD = float(os.environ.get("CLAUDE_WATCHER_SLOW_SECONDS", "60"))
+STUCK_THRESHOLD = float(os.environ.get("CLAUDE_WATCHER_STUCK_SECONDS", "180"))
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 
@@ -338,6 +340,272 @@ def _focused_session(sessions: list[SessionInfo]) -> SessionInfo | None:
     return min(candidates, key=key)
 
 
+def _focus_window_by_pid(pid: int) -> bool:
+    """Bring the topmost visible window owned by `pid` (or its ancestor
+    terminal) to the foreground. Returns True on success.
+
+    Windows-only. For Claude Code under Windows Terminal we walk up the
+    process tree because claude.exe itself doesn't own a window; the WT
+    host process does. Note: WT shows all tabs in one HWND, so we can
+    only focus the terminal window, not the specific tab within it.
+    """
+    if sys.platform != "win32" or pid <= 0:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        def parent_pid(p: int) -> int:
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            hproc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, p)
+            if not hproc:
+                return 0
+            try:
+                # NtQueryInformationProcess is the cleanest path, but for
+                # simplicity use Toolhelp32 snapshot.
+                TH32CS_SNAPPROCESS = 0x2
+                INVALID = 0xFFFFFFFF
+
+                class PROCESSENTRY32W(ctypes.Structure):
+                    _fields_ = [
+                        ("dwSize", wintypes.DWORD),
+                        ("cntUsage", wintypes.DWORD),
+                        ("th32ProcessID", wintypes.DWORD),
+                        ("th32DefaultHeapID", ctypes.c_void_p),
+                        ("th32ModuleID", wintypes.DWORD),
+                        ("cntThreads", wintypes.DWORD),
+                        ("th32ParentProcessID", wintypes.DWORD),
+                        ("pcPriClassBase", wintypes.LONG),
+                        ("dwFlags", wintypes.DWORD),
+                        ("szExeFile", wintypes.WCHAR * 260),
+                    ]
+
+                snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+                if snap == INVALID:
+                    return 0
+                try:
+                    entry = PROCESSENTRY32W()
+                    entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+                    if not kernel32.Process32FirstW(snap, ctypes.byref(entry)):
+                        return 0
+                    while True:
+                        if entry.th32ProcessID == p:
+                            return entry.th32ParentProcessID
+                        if not kernel32.Process32NextW(snap, ctypes.byref(entry)):
+                            return 0
+                finally:
+                    kernel32.CloseHandle(snap)
+            finally:
+                kernel32.CloseHandle(hproc)
+
+        # Walk pid → parent → parent … looking for an ancestor that owns
+        # a visible window. Cap depth so a broken chain can't loop.
+        candidates = []
+        cursor = pid
+        for _ in range(6):
+            candidates.append(cursor)
+            cursor = parent_pid(cursor)
+            if cursor <= 0 or cursor in candidates:
+                break
+
+        found = [0]
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+        def enum_cb(hwnd, _lparam):
+            wpid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+            if wpid.value in candidates and user32.IsWindowVisible(hwnd):
+                length = user32.GetWindowTextLengthW(hwnd)
+                if length > 0:  # skip invisible / titleless helper windows
+                    found[0] = hwnd
+                    return False
+            return True
+
+        user32.EnumWindows(enum_cb, 0)
+        if found[0]:
+            # SW_RESTORE in case window is minimized; then bring to front.
+            user32.ShowWindow(found[0], 9)
+            user32.SetForegroundWindow(found[0])
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def _toast(title: str, body: str) -> None:
+    """Fire a desktop notification. Best-effort, non-blocking.
+    Spawns the platform notifier as a detached child so a slow OS call
+    doesn't stall the watcher poll loop."""
+    import subprocess
+    try:
+        if sys.platform == "win32":
+            # PowerShell + WinRT inline. Slow (~300ms) but no extra dep.
+            ps_title = title.replace('"', '`"')
+            ps_body = body.replace('"', '`"')
+            script = (
+                "[Windows.UI.Notifications.ToastNotificationManager,"
+                "Windows.UI.Notifications,ContentType=WindowsRuntime] | Out-Null;"
+                "[Windows.Data.Xml.Dom.XmlDocument,Windows.Data.Xml.Dom.XmlDocument,"
+                "ContentType=WindowsRuntime] | Out-Null;"
+                "$x=New-Object Windows.Data.Xml.Dom.XmlDocument;"
+                f"$x.LoadXml('<toast><visual><binding template=\"ToastGeneric\">"
+                f"<text>{ps_title}</text><text>{ps_body}</text>"
+                "</binding></visual></toast>');"
+                "$t=[Windows.UI.Notifications.ToastNotification]::new($x);"
+                "[Windows.UI.Notifications.ToastNotificationManager]::"
+                "CreateToastNotifier('Anthropic.ClaudeCode').Show($t)"
+            )
+            subprocess.Popen(
+                ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", script],
+                creationflags=0x08000000,  # CREATE_NO_WINDOW
+                close_fds=True,
+            )
+        elif sys.platform == "darwin":
+            subprocess.Popen(
+                ["osascript", "-e",
+                 f'display notification "{body}" with title "{title}"'],
+                close_fds=True,
+            )
+        else:
+            # Linux: requires libnotify (notify-send). Fail silently if missing.
+            subprocess.Popen(
+                ["notify-send", title, body],
+                close_fds=True,
+            )
+    except Exception:
+        pass
+
+
+def _autostart_install() -> int:
+    """Register the tray watcher to launch on user login. Returns exit code."""
+    if sys.platform == "win32":
+        return _autostart_install_windows()
+    if sys.platform == "darwin":
+        return _autostart_install_macos()
+    return _autostart_install_linux()
+
+
+def _autostart_uninstall() -> int:
+    if sys.platform == "win32":
+        return _autostart_uninstall_windows()
+    if sys.platform == "darwin":
+        return _autostart_uninstall_macos()
+    return _autostart_uninstall_linux()
+
+
+_AUTOSTART_NAME = "ClaudeCodeWatcher"
+
+
+def _watcher_launch_command() -> str:
+    """Command line that launches the tray watcher silently.
+    Prefers pythonw on Windows to avoid a console window."""
+    py = Path(sys.executable)
+    if sys.platform == "win32":
+        pyw = py.with_name("pythonw.exe")
+        if pyw.exists():
+            py = pyw
+    return f'"{py}" "{Path(__file__).resolve()}" --tray'
+
+
+def _autostart_install_windows() -> int:
+    try:
+        import winreg
+        cmd = _watcher_launch_command()
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            0, winreg.KEY_SET_VALUE,
+        ) as k:
+            winreg.SetValueEx(k, _AUTOSTART_NAME, 0, winreg.REG_SZ, cmd)
+        print(f"Installed autostart (HKCU…\\Run\\{_AUTOSTART_NAME}):")
+        print(f"  {cmd}")
+        return 0
+    except OSError as e:
+        print(f"autostart install failed: {e}", file=sys.stderr)
+        return 1
+
+
+def _autostart_uninstall_windows() -> int:
+    try:
+        import winreg
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            0, winreg.KEY_SET_VALUE,
+        ) as k:
+            try:
+                winreg.DeleteValue(k, _AUTOSTART_NAME)
+                print(f"Removed autostart (HKCU…\\Run\\{_AUTOSTART_NAME})")
+            except FileNotFoundError:
+                print("No autostart entry to remove.")
+        return 0
+    except OSError as e:
+        print(f"autostart uninstall failed: {e}", file=sys.stderr)
+        return 1
+
+
+def _autostart_install_macos() -> int:
+    plist_path = Path.home() / "Library" / "LaunchAgents" / "com.anthropic.claude-code-watcher.plist"
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    plist = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.anthropic.claude-code-watcher</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{sys.executable}</string>
+    <string>{Path(__file__).resolve()}</string>
+    <string>--tray</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><false/>
+</dict>
+</plist>
+"""
+    plist_path.write_text(plist, encoding="utf-8")
+    print(f"Installed autostart: {plist_path}")
+    print("Activate with: launchctl load ~/Library/LaunchAgents/com.anthropic.claude-code-watcher.plist")
+    return 0
+
+
+def _autostart_uninstall_macos() -> int:
+    plist_path = Path.home() / "Library" / "LaunchAgents" / "com.anthropic.claude-code-watcher.plist"
+    if plist_path.exists():
+        plist_path.unlink()
+        print(f"Removed: {plist_path}")
+    else:
+        print("No autostart plist to remove.")
+    return 0
+
+
+def _autostart_install_linux() -> int:
+    desktop_dir = Path.home() / ".config" / "autostart"
+    desktop_dir.mkdir(parents=True, exist_ok=True)
+    desktop_path = desktop_dir / "claude-code-watcher.desktop"
+    body = f"""[Desktop Entry]
+Type=Application
+Name=Claude Code Watcher
+Exec={sys.executable} {Path(__file__).resolve()} --tray
+X-GNOME-Autostart-enabled=true
+"""
+    desktop_path.write_text(body, encoding="utf-8")
+    print(f"Installed autostart: {desktop_path}")
+    return 0
+
+
+def _autostart_uninstall_linux() -> int:
+    desktop_path = Path.home() / ".config" / "autostart" / "claude-code-watcher.desktop"
+    if desktop_path.exists():
+        desktop_path.unlink()
+        print(f"Removed: {desktop_path}")
+    else:
+        print("No autostart .desktop to remove.")
+    return 0
+
+
 def run_tray(args, sessions_dir: Path) -> None:
     """Headless mode: drive a system tray icon from the polling loop.
     Tray icon is a single colored circle; color = loudest severity."""
@@ -360,13 +628,22 @@ def run_tray(args, sessions_dir: Path) -> None:
         stop_event.set()
         icon.stop()
 
+    def focus_session(pid: int):
+        # Returned as the callable passed to MenuItem — pystray invokes it with
+        # (icon, item). We just care about the pid captured at build time.
+        def _handler(_icon=None, _item=None):
+            _focus_window_by_pid(pid)
+        return _handler
+
     def menu_items():
         sessions = scan_sessions(sessions_dir)
         items = []
         if sessions:
             for s in sessions:
                 label = classify(s)[0].strip()
-                items.append(pystray.MenuItem(f"{s.project}: {label}", None, enabled=False))
+                items.append(pystray.MenuItem(
+                    f"{s.project}: {label}", focus_session(s.pid)
+                ))
         items.append(pystray.Menu.SEPARATOR)
         items.append(pystray.MenuItem("Quit", on_quit))
         return items
@@ -390,11 +667,19 @@ def run_tray(args, sessions_dir: Path) -> None:
                 icon.icon = icons[sev]
                 icon.title = build_tooltip(sessions, focused_session_id=focused_sid)
 
-                curr_severity = {
-                    s.session_id or f"pid{s.pid}": classify(s)[2] for s in sessions
+                sess_by_key = {
+                    s.session_id or f"pid{s.pid}": s for s in sessions
                 }
-                if not args.no_sound:
-                    for _ in diff_alerts(prev_severity, curr_severity):
+                curr_severity = {k: classify(s)[2] for k, s in sess_by_key.items()}
+                escalated = diff_alerts(prev_severity, curr_severity)
+                for key in escalated:
+                    s = sess_by_key.get(key)
+                    if s is None:
+                        continue
+                    state = "WAIT" if s.status == "waiting" else "STUCK"
+                    _toast(f"[{s.project}] {state}",
+                           "Permission needed" if state == "WAIT" else "Session silent ≥3 min")
+                    if not args.no_sound:
                         beep()
                 prev_severity = curr_severity
             except Exception:
@@ -439,7 +724,16 @@ def main() -> None:
                     help="do not beep on STUCK / WAIT transitions")
     ap.add_argument("--tray", action="store_true",
                     help="run headless with a system tray icon instead of the TUI table")
+    ap.add_argument("--install-autostart", action="store_true",
+                    help="register the tray watcher to launch on user login, then exit")
+    ap.add_argument("--uninstall-autostart", action="store_true",
+                    help="remove the autostart registration, then exit")
     args = ap.parse_args()
+
+    if args.install_autostart:
+        sys.exit(_autostart_install())
+    if args.uninstall_autostart:
+        sys.exit(_autostart_uninstall())
 
     sessions_dir_str = args.sessions_dir or os.environ.get("CLAUDE_SESSIONS_DIR")
     sessions_dir = Path(sessions_dir_str) if sessions_dir_str else (
