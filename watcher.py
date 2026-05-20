@@ -423,6 +423,28 @@ def _save_config(cfg: dict) -> None:
         pass
 
 
+SNOOZE_DURATIONS = [
+    ("Snooze 10 min", 10 * 60),
+    ("Snooze 30 min", 30 * 60),
+    ("Snooze 1 hour", 60 * 60),
+]
+
+
+def is_snoozed(cfg: dict, session_id: str) -> bool:
+    """True if `session_id` has a future snooze_until in cfg['snoozed'].
+    Auto-prunes expired entries from the dict (in place)."""
+    snoozed = cfg.get("snoozed")
+    if not isinstance(snoozed, dict):
+        return False
+    until = snoozed.get(session_id)
+    if until is None:
+        return False
+    if time.time() >= until:
+        snoozed.pop(session_id, None)
+        return False
+    return True
+
+
 def _watcher_launch_vbs_path() -> Path:
     """Path to the VBS launcher dropped next to watcher.py."""
     return Path(__file__).resolve().parent / "_claude_code_watcher_launch.vbs"
@@ -618,6 +640,22 @@ def run_tray(args, sessions_dir: Path) -> None:
         _save_config(cfg)
         icon.update_menu()
 
+    def do_snooze(session_id: str, seconds: int):
+        def handler(icon, _item):
+            cfg.setdefault("snoozed", {})[session_id] = time.time() + seconds
+            _save_config(cfg)
+            icon.update_menu()
+        return handler
+
+    def do_unsnooze(session_id: str):
+        def handler(icon, _item):
+            snoozed = cfg.get("snoozed")
+            if isinstance(snoozed, dict):
+                snoozed.pop(session_id, None)
+                _save_config(cfg)
+                icon.update_menu()
+        return handler
+
     def menu_items():
         sessions = scan_sessions(sessions_dir)
         items = [
@@ -632,12 +670,18 @@ def run_tray(args, sessions_dir: Path) -> None:
             items.append(pystray.Menu.SEPARATOR)
             for s in sessions:
                 label = classify(s)[0].strip()
-                # Enabled with a no-op handler so the OS renders the text
-                # in normal (black) color rather than the disabled gray.
-                items.append(pystray.MenuItem(
-                    f"{s.project}: {label}",
-                    lambda _i=None, _t=None: None,
-                ))
+                snoozed = is_snoozed(cfg, s.session_id)
+                text = f"{s.project}: {label}"
+                if snoozed:
+                    text += "  (zzz)"
+                sub = [
+                    pystray.MenuItem(name, do_snooze(s.session_id, secs))
+                    for name, secs in SNOOZE_DURATIONS
+                ]
+                if snoozed:
+                    sub.append(pystray.Menu.SEPARATOR)
+                    sub.append(pystray.MenuItem("Unsnooze", do_unsnooze(s.session_id)))
+                items.append(pystray.MenuItem(text, pystray.Menu(*sub)))
         items.append(pystray.Menu.SEPARATOR)
         items.append(pystray.MenuItem("Quit", on_quit))
         return items
@@ -668,9 +712,11 @@ def run_tray(args, sessions_dir: Path) -> None:
                     s = sess_by_key.get(key)
                     if s is None:
                         continue
-                    state = "WAIT" if s.status == "waiting" else "STUCK"
-                    _toast(f"[{s.project}] {state}",
-                           "Permission needed" if state == "WAIT" else "Session silent ≥3 min")
+                    if is_snoozed(cfg, s.session_id):
+                        continue
+                    label = "WAIT" if s.status == "waiting" else "STUCK"
+                    _toast(f"[{s.project}] {label}",
+                           "Permission needed" if label == "WAIT" else "Session silent ≥3 min")
                     if not args.no_sound:
                         beep()
                 prev_severity = curr_severity
@@ -769,6 +815,7 @@ def run_flyout(args, sessions_dir: Path) -> None:
             w.destroy()
         timestamp.config(text=time.strftime("%H:%M:%S"))
         sessions = scan_sessions(sessions_dir)
+        cfg = _load_config()
 
         if not sessions:
             tk.Label(rows, text="No active sessions", fg=MUTED, bg=BG,
@@ -783,8 +830,9 @@ def run_flyout(args, sessions_dir: Path) -> None:
             label = classify(s)[0].strip()
             status_word = label.split()[-1] if " " in label else label
             dot_color = SEV_HEX.get(sev, MUTED)
+            snoozed = is_snoozed(cfg, s.session_id)
 
-            # Top row: dot, project name, status word.
+            # Top row: dot, project name (+ zzz if snoozed), status word.
             row = tk.Frame(rows, bg=BG)
             row.pack(fill="x", pady=(2, 0))
             tk.Label(row, text="●", fg=dot_color, bg=BG,
@@ -794,6 +842,9 @@ def run_flyout(args, sessions_dir: Path) -> None:
                 name = name.upper()
             tk.Label(row, text=name, fg=FG, bg=BG,
                      font=theme["name_font"]).pack(side="left")
+            if snoozed:
+                tk.Label(row, text="zzz", fg=MUTED, bg=BG,
+                         font=("Calibri", 9, "italic")).pack(side="left", padx=(6, 0))
             tk.Label(row, text=status_word, fg=dot_color, bg=BG,
                      font=theme["status_font"]).pack(side="right")
 
@@ -812,7 +863,10 @@ def run_flyout(args, sessions_dir: Path) -> None:
             if age is not None:
                 detail_parts.append(f"age {fmt_elapsed(age)}")
             if tool:
-                detail_parts.append(f"running: {tool}")
+                # When the session is waiting on permission, the unresolved
+                # tool_use is what's being asked about, not what's running.
+                verb = "needs" if s.status == "waiting" else "running"
+                detail_parts.append(f"{verb}: {tool}")
             if detail_parts:
                 detail = tk.Frame(rows, bg=BG)
                 detail.pack(fill="x", padx=(22, 0), pady=(0, 1))
