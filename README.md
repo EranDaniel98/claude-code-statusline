@@ -27,7 +27,7 @@ When you run several Claude Code sessions in parallel terminals, it's easy to lo
 | Segment       | Meaning                                                                                     |
 |---------------|---------------------------------------------------------------------------------------------|
 | `project-name`| `session_name` if set, else `cwd` basename. Truncates with `…` to fit terminal width.       |
-| colored `●` | Session classification (color-only, matches tray icon). See [Status colors](#status-colors) for what each color means. Hidden = idle. |
+| `●` / `● THINKING` / `● STUCK` / `● WAITING` | Session classification. Green `●` = busy (fresh). Yellow `● THINKING` = busy + silent ≥60s. Red `● STUCK` = silent ≥180s. Red `● WAITING` = permission prompt pending. Hidden = idle. See [Status colors](#status-colors) for full details. |
 | `Opus 4.7 1M` | Model display name; `1M` suffix when 1M context is enabled.                                 |
 | `13% (131k)`  | Context used: percent + token count. Dim → yellow ≥60 → bold yellow ≥80 → red ≥90.          |
 | `5h:19% 7d:48%`| Rate-limit usage (5-hour / 7-day). Dim → yellow → red as it climbs.                        |
@@ -37,13 +37,13 @@ When you run several Claude Code sessions in parallel terminals, it's easy to lo
 
 Both the statusline `●` and the tray icon share the same colors and thresholds.
 
-| Color | Name | Trigger | What to do |
-|---|---|---|---|
-| **Green `●`** | BUSY | Session is `busy` and the last non-thinking transcript entry is <60s old | Nothing — Claude is healthily working |
-| **Yellow `●`** | THINK | Busy, last non-thinking entry is ≥60s old | Wait — likely a long thinking block or a slow tool call. Heads-up, not yet a problem |
-| **Red `●`** | STUCK or WAIT | Either (a) busy + silent ≥180s, **or** (b) `status=waiting` (permission prompt pending) | Look at the Claude Code window. Permission dialog? Approve/deny. No dialog? Claude is probably hung — consider interrupting |
-| **Gray `●`** (tray only) | All idle | No sessions, or all sessions are `idle` | Nothing |
-| *no dot* (statusline only) | Idle | `status=idle` (turn finished, awaiting input) | Type your next prompt |
+| Color | Statusline | Tray | Trigger | What to do |
+|---|---|---|---|---|
+| Green | `●` | green dot / count | Session is `busy` and the last non-thinking transcript entry is <60s old | Nothing — Claude is healthily working |
+| Yellow | `● THINKING` | yellow dot / count | Busy, last non-thinking entry is ≥60s old | Wait — likely a long thinking block or a slow tool call. Heads-up, not yet a problem |
+| Red | `● STUCK` | red dot / count | Busy + silent ≥180s | Probably hung — consider interrupting |
+| Red | `● WAITING` | red dot / count | `status=waiting` (permission prompt pending) | Approve/deny the dialog in the Claude Code window |
+| Gray | *(hidden)* | gray dot / 0-count | No sessions, or all sessions are `idle` | Nothing |
 
 **Thresholds**: `SLOW_THRESHOLD=60s` (yellow) and `STUCK_THRESHOLD=180s` (red), defined once in `watcher.py` and mirrored in `statusline.py` so the two surfaces never disagree.
 
@@ -92,18 +92,22 @@ uv venv .venv && uv pip install pystray pillow   # one-time, into the project ve
 .venv/bin/python  watcher.py --tray              # macOS / Linux
 ```
 
-Icon color reflects the loudest state across all sessions:
+**Layouts** (`--layout`):
 
-| Color   | Meaning |
-|---------|---------|
-| Gray    | No sessions / all idle |
-| Green   | At least one `● BUSY`, none escalated |
-| Yellow  | At least one `⌛ THINK` |
-| Red     | At least one `⚠ STUCK` or `▶ WAIT` |
+- `count` (default) — colored circle with the number of *active* (non-idle) sessions drawn inside.
+- `dot` — plain colored circle, no number. Pre-existing behavior.
 
-Tooltip lists each session's classification; right-click → `Quit` to exit. Beeps on STUCK/WAIT escalations same as the TUI mode (use `--no-sound` to silence).
+Color = the loudest severity across all sessions (see [Status colors](#status-colors)).
 
-On Windows, launch with `pythonw.exe` instead of `python.exe` to suppress the terminal window:
+**Tooltip** lists each session's classification. When a terminal window is the OS foreground, the most-recently-active session is sorted to the top with a `▶` marker — proxy for "the session you're probably looking at" (we can't read which tab inside Windows Terminal is active without UI Automation).
+
+**Click flyout** — double-click the tray icon (or pick `Open` from the right-click menu) to pop a small borderless window listing all sessions: colored dot, project name, last-activity age. The focused session is bolded with `▶`. The flyout closes on focus-loss or `Esc`. It's rendered by a child process so it doesn't block the tray.
+
+**Quit** — right-click → `Quit`.
+
+**Beeps** on STUCK/WAIT escalations same as the TUI mode (use `--no-sound` to silence).
+
+On Windows, launch with `pythonw.exe` instead of `python.exe` to suppress the parent terminal window:
 ```
 .venv/Scripts/pythonw watcher.py --tray
 ```

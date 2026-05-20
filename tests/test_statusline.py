@@ -146,25 +146,25 @@ def main() -> None:
         with session_file("waiting") as sid, transcript_file(age_seconds=500) as tr:
             out = render(payload(sid, tr), columns=120)
             results.append(check(
-                "waiting session → red ●", out,
-                lambda o: "\x1b[1;31m●\x1b[0m" in o,
-                "red '●' (permission prompt)",
+                "waiting session → red '● WAITING'", out,
+                lambda o: "\x1b[1;31m● WAITING\x1b[0m" in o,
+                "red '● WAITING'",
             ))
 
         with session_file("busy") as sid, transcript_file(age_seconds=75) as tr:
             out = render(payload(sid, tr), columns=120)
             results.append(check(
-                "busy + ≥60s silent → yellow ●", out,
-                lambda o: "\x1b[1;33m●\x1b[0m" in o,
-                "yellow '●' (THINK)",
+                "busy + ≥60s silent → yellow '● THINKING'", out,
+                lambda o: "\x1b[1;33m● THINKING\x1b[0m" in o,
+                "yellow '● THINKING'",
             ))
 
         with session_file("busy") as sid, transcript_file(age_seconds=250) as tr:
             out = render(payload(sid, tr), columns=120)
             results.append(check(
-                "busy + ≥180s silent → red ●", out,
-                lambda o: "\x1b[1;31m●\x1b[0m" in o,
-                "red '●' (STUCK)",
+                "busy + ≥180s silent → red '● STUCK'", out,
+                lambda o: "\x1b[1;31m● STUCK\x1b[0m" in o,
+                "red '● STUCK'",
             ))
 
         with session_file("idle") as sid, transcript_file(age_seconds=500) as tr:
@@ -275,9 +275,9 @@ def main() -> None:
         with session_file("busy") as sid, jsonl_transcript([(75, False), (5, True)]) as tr:
             out = render(payload(sid, tr), columns=120)
             results.append(check(
-                "fresh thinking + 75s-old text → yellow ● (thinking skipped)", out,
-                lambda o: "\x1b[1;33m●\x1b[0m" in o,
-                "yellow '●' despite fresh thinking write",
+                "fresh thinking + 75s-old text → yellow '● THINKING' (thinking skipped)", out,
+                lambda o: "\x1b[1;33m● THINKING\x1b[0m" in o,
+                "yellow '● THINKING' despite fresh thinking write",
             ))
 
         # Fresh non-thinking entry → status stays at ● BUSY.

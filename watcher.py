@@ -238,37 +238,154 @@ def overall_severity(sessions: list[SessionInfo]) -> str:
     return "idle"
 
 
-def build_tooltip(sessions: list[SessionInfo]) -> str:
-    """Multi-line tray tooltip. Capped at 120 chars (Windows NotifyIcon limit)."""
+def _active_count(sessions: list[SessionInfo]) -> int:
+    """Number of non-idle sessions."""
+    return sum(1 for s in sessions if s.status != "idle")
+
+
+_SEVERITY_COLORS = {
+    "idle":   (158, 158, 158, 255),  # gray
+    "normal": (76, 175, 80, 255),    # green
+    "warn":   (255, 193, 7, 255),    # yellow
+    "alert":  (244, 67, 54, 255),    # red
+}
+
+
+def build_tooltip(sessions: list[SessionInfo],
+                  focused_session_id: str | None = None) -> str:
+    """Multi-line tray tooltip. Capped at 120 chars (Windows NotifyIcon limit).
+
+    When `focused_session_id` is given, that session is sorted to the top
+    with a ▶ marker so the user can spot it without reading the list.
+    """
     if not sessions:
         return "Claude Code · no sessions"
+    if focused_session_id:
+        focused = next((s for s in sessions if s.session_id == focused_session_id), None)
+        others = [s for s in sessions if s.session_id != focused_session_id]
+        ordered = ([focused] if focused else []) + others
+    else:
+        ordered = list(sessions)
     lines = ["Claude Code"]
-    for s in sessions:
+    for s in ordered:
         label = classify(s)[0].strip()
         proj = s.project[:18]
-        lines.append(f"{proj}: {label}")
+        marker = "▶ " if focused_session_id and s.session_id == focused_session_id else "  "
+        lines.append(f"{marker}{proj}: {label}")
     return "\n".join(lines)[:120]
 
 
-def _make_icon_image(severity: str):
-    """Generate a colored circle icon for the tray. Lazy PIL import."""
+def _make_dot_icon(severity: str):
+    """Simple colored circle (the --layout=dot option)."""
     from PIL import Image, ImageDraw
-    colors = {
-        "idle":   (158, 158, 158, 255),  # gray
-        "normal": (76, 175, 80, 255),    # green
-        "warn":   (255, 193, 7, 255),    # yellow
-        "alert":  (244, 67, 54, 255),    # red
-    }
-    color = colors.get(severity, colors["idle"])
+    color = _SEVERITY_COLORS.get(severity, _SEVERITY_COLORS["idle"])
     size = 64
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    draw.ellipse((6, 6, size - 6, size - 6), fill=color)
+    ImageDraw.Draw(img).ellipse((6, 6, size - 6, size - 6), fill=color)
     return img
 
 
+def _make_count_icon(severity: str, count: int):
+    """Colored circle with active-session count drawn in the center.
+    Count >99 displays as '99+'. Empty when count==0."""
+    from PIL import Image, ImageDraw, ImageFont
+    color = _SEVERITY_COLORS.get(severity, _SEVERITY_COLORS["idle"])
+    size = 64
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.ellipse((4, 4, size - 4, size - 4), fill=color)
+    if count > 0:
+        text = str(count) if count < 100 else "99+"
+        # Yellow background needs dark text for contrast; others use white.
+        text_color = (0, 0, 0) if severity == "warn" else (255, 255, 255)
+        font_size = {1: 40, 2: 32, 3: 24}.get(len(text), 24)
+        font = None
+        for candidate in ("arialbd.ttf", "arial.ttf", "DejaVuSans-Bold.ttf"):
+            try:
+                font = ImageFont.truetype(candidate, font_size)
+                break
+            except (OSError, IOError):
+                continue
+        if font is None:
+            font = ImageFont.load_default()
+        bbox = draw.textbbox((0, 0), text, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        x = (size - tw) / 2 - bbox[0]
+        y = (size - th) / 2 - bbox[1]
+        draw.text((x, y), text, fill=text_color, font=font)
+    return img
+
+
+_TERMINAL_PROCESS_NAMES = {
+    "WindowsTerminal.exe", "cmd.exe", "powershell.exe", "pwsh.exe",
+    "conhost.exe", "wt.exe", "claude.exe", "node.exe",
+}
+
+
+def _foreground_is_claude_terminal() -> bool:
+    """Heuristic: is the OS foreground window a terminal/Claude process?
+    Win32-only. Returns False on non-Windows or on any error.
+
+    The 'which tab' question can't be answered without UI Automation, so
+    we settle for 'any terminal is foreground' and let `_focused_session`
+    pick the most-recently-active Claude as the focus proxy.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return False
+        pid = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        hproc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+        if not hproc:
+            return False
+        try:
+            buf = ctypes.create_unicode_buffer(260)
+            size = ctypes.c_ulong(260)
+            if kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size)):
+                exe = buf.value.split("\\")[-1]
+                return exe in _TERMINAL_PROCESS_NAMES
+        finally:
+            kernel32.CloseHandle(hproc)
+    except Exception:
+        return False
+    return False
+
+
+def _focused_session(sessions: list[SessionInfo]) -> SessionInfo | None:
+    """Proxy for 'which session is currently focused' — returns the
+    most-recently-active session, but only when a terminal is foreground
+    on Windows. Returns None otherwise (no focus marker shown)."""
+    if not _foreground_is_claude_terminal():
+        return None
+    candidates = [s for s in sessions if s.status in ("busy", "waiting")] or sessions
+    if not candidates:
+        return None
+
+    def key(s: SessionInfo) -> float:
+        return s.transcript_age if s.transcript_age is not None else float("inf")
+
+    return min(candidates, key=key)
+
+
 def run_tray(args, sessions_dir: Path) -> None:
-    """Headless mode: drive a system tray icon from the polling loop."""
+    """Headless mode: drive a system tray icon from the polling loop.
+
+    Layout = 'dot' uses a plain colored circle.
+    Layout = 'count' uses a colored circle with the active-session count
+    drawn in the center.
+
+    Double-click the tray icon (or pick 'Open' from the right-click menu)
+    to pop a flyout window listing all sessions. The flyout is rendered
+    by a child process (`python watcher.py --flyout`) so its tkinter
+    event loop does not contend with pystray's Win32 message pump.
+    """
     try:
         import pystray  # noqa: F401
     except ImportError:
@@ -278,9 +395,19 @@ def run_tray(args, sessions_dir: Path) -> None:
         sys.exit(2)
 
     import pystray
+    import subprocess
     import threading
 
-    icons = {sev: _make_icon_image(sev) for sev in ("idle", "normal", "warn", "alert")}
+    dot_icons = {sev: _make_dot_icon(sev) for sev in ("idle", "normal", "warn", "alert")}
+    count_icon_cache: dict[tuple, object] = {}
+
+    def get_icon(severity: str, count: int):
+        if args.layout == "dot":
+            return dot_icons[severity]
+        key = (severity, count)
+        if key not in count_icon_cache:
+            count_icon_cache[key] = _make_count_icon(severity, count)
+        return count_icon_cache[key]
 
     stop_event = threading.Event()
 
@@ -288,20 +415,38 @@ def run_tray(args, sessions_dir: Path) -> None:
         stop_event.set()
         icon.stop()
 
+    def open_flyout(_icon=None, _item=None):
+        # Detached child so the flyout outlives this method call but
+        # doesn't carry our stdin/stdout; CREATE_NO_WINDOW suppresses a
+        # cmd-window flash if the parent is python.exe (not pythonw.exe).
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = 0x08000000  # CREATE_NO_WINDOW
+        try:
+            subprocess.Popen(
+                [sys.executable, str(Path(__file__).resolve()), "--flyout",
+                 "--sessions-dir", str(sessions_dir)],
+                creationflags=creationflags,
+                close_fds=True,
+            )
+        except Exception:
+            pass
+
     def menu_items():
         sessions = scan_sessions(sessions_dir)
-        items = []
-        for s in sessions:
-            label = classify(s)[0].strip()
-            items.append(pystray.MenuItem(f"{s.project}: {label}", None, enabled=False))
-        if items:
+        items = [pystray.MenuItem("Open", open_flyout, default=True)]
+        if sessions:
             items.append(pystray.Menu.SEPARATOR)
+            for s in sessions:
+                label = classify(s)[0].strip()
+                items.append(pystray.MenuItem(f"{s.project}: {label}", None, enabled=False))
+        items.append(pystray.Menu.SEPARATOR)
         items.append(pystray.MenuItem("Quit", on_quit))
         return items
 
     icon = pystray.Icon(
         "claude-code-watcher",
-        icons["idle"],
+        dot_icons["idle"],
         "Claude Code · starting",
         menu=pystray.Menu(lambda: menu_items()),
     )
@@ -312,8 +457,12 @@ def run_tray(args, sessions_dir: Path) -> None:
             try:
                 sessions = scan_sessions(sessions_dir)
                 sev = overall_severity(sessions)
-                icon.icon = icons[sev]
-                icon.title = build_tooltip(sessions)
+                count = _active_count(sessions)
+                focused = _focused_session(sessions)
+                focused_sid = focused.session_id if focused else None
+
+                icon.icon = get_icon(sev, count)
+                icon.title = build_tooltip(sessions, focused_session_id=focused_sid)
 
                 curr_severity = {
                     s.session_id or f"pid{s.pid}": classify(s)[2] for s in sessions
@@ -331,8 +480,99 @@ def run_tray(args, sessions_dir: Path) -> None:
         icon.visible = True
         threading.Thread(target=poll_loop, daemon=True).start()
 
-    print("Claude Code Watcher · tray icon active. Right-click → Quit to exit.")
+    print("Claude Code Watcher · tray icon active. Double-click for flyout, right-click → Quit.")
     icon.run(setup=setup)
+
+
+def run_flyout(args, sessions_dir: Path) -> None:
+    """Render a borderless tk window listing all sessions; exit on focus-out
+    or Escape. Invoked as a child process by run_tray() on tray click."""
+    import tkinter as tk
+
+    root = tk.Tk()
+    root.title("Claude Code")
+    root.overrideredirect(True)
+    root.attributes("-topmost", True)
+    root.configure(bg="#1e1e1e")
+
+    SEV_HEX = {
+        "normal": "#4caf50",
+        "warn":   "#ffc107",
+        "alert":  "#f44336",
+        "idle":   "#9e9e9e",
+    }
+
+    width, height = 360, 220
+    sw = root.winfo_screenwidth()
+    sh = root.winfo_screenheight()
+    # Pin near the taskbar / tray on the bottom-right.
+    x = sw - width - 20
+    y = sh - height - 70
+    root.geometry(f"{width}x{height}+{x}+{y}")
+
+    container = tk.Frame(root, bg="#1e1e1e", padx=14, pady=12,
+                         highlightbackground="#444", highlightthickness=1)
+    container.pack(fill="both", expand=True)
+
+    tk.Label(container, text="Claude Code", fg="white", bg="#1e1e1e",
+             font=("Segoe UI", 11, "bold")).pack(anchor="w")
+
+    rows = tk.Frame(container, bg="#1e1e1e")
+    rows.pack(fill="both", expand=True, pady=(8, 0))
+
+    def render():
+        for w in rows.winfo_children():
+            w.destroy()
+        sessions = scan_sessions(sessions_dir)
+        focused = _focused_session(sessions)
+        focused_sid = focused.session_id if focused else None
+
+        if not sessions:
+            tk.Label(rows, text="No active sessions",
+                     fg="#777", bg="#1e1e1e",
+                     font=("Segoe UI", 9, "italic")).pack(anchor="w", pady=4)
+            return
+
+        def sort_key(s: SessionInfo):
+            is_focused = 0 if focused_sid and s.session_id == focused_sid else 1
+            age = s.transcript_age if s.transcript_age is not None else float("inf")
+            return (is_focused, age)
+
+        for s in sorted(sessions, key=sort_key):
+            sev = classify(s)[2]
+            color = SEV_HEX.get(sev, "#777")
+            is_focused = focused_sid and s.session_id == focused_sid
+            row = tk.Frame(rows, bg="#1e1e1e")
+            row.pack(fill="x", pady=2)
+            tk.Label(row, text="▶" if is_focused else "  ",
+                     fg="white", bg="#1e1e1e", width=2,
+                     font=("Segoe UI", 9)).pack(side="left")
+            tk.Label(row, text="●", fg=color, bg="#1e1e1e",
+                     font=("Segoe UI", 13)).pack(side="left", padx=(0, 8))
+            tk.Label(row, text=s.project[:24], fg="white", bg="#1e1e1e",
+                     font=("Segoe UI", 9, "bold" if is_focused else "normal")
+                     ).pack(side="left")
+            age = s.transcript_age
+            age_str = fmt_elapsed(age) if age is not None else "—"
+            tk.Label(row, text=age_str, fg="#aaa", bg="#1e1e1e",
+                     font=("Segoe UI", 9)).pack(side="right")
+
+    def tick():
+        try:
+            render()
+        except Exception:
+            pass
+        root.after(700, tick)
+
+    def close(_event=None):
+        root.destroy()
+
+    render()
+    root.bind("<FocusOut>", close)
+    root.bind("<Escape>", close)
+    root.after(700, tick)
+    root.focus_force()
+    root.mainloop()
 
 
 def run_tui(args, sessions_dir: Path) -> None:
@@ -364,6 +604,10 @@ def main() -> None:
                     help="do not beep on STUCK / WAIT transitions")
     ap.add_argument("--tray", action="store_true",
                     help="run headless with a system tray icon instead of the TUI table")
+    ap.add_argument("--layout", choices=["dot", "count"], default="count",
+                    help="tray icon layout: 'dot' = plain colored circle, "
+                         "'count' = colored circle with active-session count (default)")
+    ap.add_argument("--flyout", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     sessions_dir_str = args.sessions_dir or os.environ.get("CLAUDE_SESSIONS_DIR")
@@ -371,7 +615,9 @@ def main() -> None:
         Path.home() / ".claude" / "sessions"
     )
 
-    if args.tray:
+    if args.flyout:
+        run_flyout(args, sessions_dir)
+    elif args.tray:
         run_tray(args, sessions_dir)
     else:
         run_tui(args, sessions_dir)
