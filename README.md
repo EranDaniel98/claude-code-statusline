@@ -131,6 +131,28 @@ First time the watcher fires a toast, macOS will prompt you to allow notificatio
 
 To remove on any platform: `python watcher.py --uninstall-autostart`.
 
+### Auto-start when Claude opens (alternative to OS-login)
+
+If you'd rather the tray only run while you're actually using Claude — not idle in the background between reboots — register a Claude Code `SessionStart` hook instead. The hook fires when you open a Claude session; a tiny launcher (`hooks/launch_watcher.py`) checks via `psutil` whether a tray watcher is already alive and spawns one only if not. Subsequent session opens are no-ops.
+
+```powershell
+.venv\Scripts\python watcher.py --register-claude-hook   # Windows
+```
+```bash
+.venv/bin/python watcher.py --register-claude-hook       # macOS / Linux
+```
+
+This adds an entry under `hooks.SessionStart` in `~/.claude/settings.json` (with a `.bak` of the previous file). The command line uses the venv's Python path so the launcher can `import psutil`. Idempotent — re-running detects the existing entry and does nothing.
+
+| | OS-login autostart | SessionStart hook |
+|---|---|---|
+| Trigger | At every login | First Claude session after a reboot |
+| Watcher running when no Claude windows open | Yes (~30 MB RAM idle) | No |
+| Startup latency on first Claude open | None (already running) | ~300 ms (pystray spin-up) |
+| Setup command | `--install-autostart` | `--register-claude-hook` |
+
+Pick one. To remove the hook: `python watcher.py --unregister-claude-hook`.
+
 ### Configurable thresholds
 
 Override the classification thresholds via env vars (same vars read by `statusline.py` so the two surfaces never disagree):

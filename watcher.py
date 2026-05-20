@@ -590,6 +590,117 @@ def _autostart_uninstall_macos() -> int:
     return 0
 
 
+def _venv_python_path() -> str:
+    """Return the venv's Python next to watcher.py, or sys.executable."""
+    project_root = Path(__file__).resolve().parent
+    if sys.platform == "win32":
+        cand = project_root / ".venv" / "Scripts" / "python.exe"
+    else:
+        cand = project_root / ".venv" / "bin" / "python"
+    return str(cand) if cand.exists() else sys.executable
+
+
+def _claude_settings_path() -> Path:
+    return Path.home() / ".claude" / "settings.json"
+
+
+def _claude_hook_command() -> str:
+    """Quoted command string to put in settings.json hooks.SessionStart."""
+    py = _venv_python_path()
+    script = Path(__file__).resolve().parent / "hooks" / "launch_watcher.py"
+    return f'"{py}" "{script}"'
+
+
+def _claude_hook_install() -> int:
+    """Add a SessionStart hook to ~/.claude/settings.json that launches
+    the tray watcher (idempotently) when Claude opens a session."""
+    settings_path = _claude_settings_path()
+    script = Path(__file__).resolve().parent / "hooks" / "launch_watcher.py"
+    if not script.exists():
+        print(f"launch script missing: {script}", file=sys.stderr)
+        return 1
+
+    command = _claude_hook_command()
+
+    settings: dict = {}
+    if settings_path.exists():
+        try:
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"could not parse {settings_path}: {e}", file=sys.stderr)
+            return 1
+
+    hooks = settings.setdefault("hooks", {})
+    session_start = hooks.setdefault("SessionStart", [])
+
+    for entry in session_start:
+        for h in entry.get("hooks", []) or []:
+            if h.get("command") == command:
+                print("SessionStart hook already registered; nothing to do.")
+                return 0
+
+    session_start.append({"hooks": [{"type": "command", "command": command}]})
+
+    if settings_path.exists():
+        try:
+            settings_path.with_suffix(".json.bak").write_text(
+                settings_path.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+        except OSError:
+            pass
+
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+    print(f"Registered SessionStart hook in {settings_path}")
+    print(f"  {command}")
+    return 0
+
+
+def _claude_hook_uninstall() -> int:
+    settings_path = _claude_settings_path()
+    if not settings_path.exists():
+        print("No settings.json to edit.")
+        return 0
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"could not parse {settings_path}: {e}", file=sys.stderr)
+        return 1
+
+    script_str = str(Path(__file__).resolve().parent / "hooks" / "launch_watcher.py")
+    hooks = settings.get("hooks") or {}
+    session_start = hooks.get("SessionStart") or []
+    removed = 0
+    new_entries: list = []
+    for entry in session_start:
+        new_hooks = []
+        for h in entry.get("hooks", []) or []:
+            if script_str in (h.get("command") or ""):
+                removed += 1
+                continue
+            new_hooks.append(h)
+        if new_hooks:
+            entry = dict(entry)
+            entry["hooks"] = new_hooks
+            new_entries.append(entry)
+
+    if removed == 0:
+        print("No matching SessionStart hook to remove.")
+        return 0
+
+    if new_entries:
+        hooks["SessionStart"] = new_entries
+    else:
+        hooks.pop("SessionStart", None)
+        if not hooks:
+            settings.pop("hooks", None)
+
+    settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    print(f"Removed {removed} hook entry/entries from {settings_path}")
+    return 0
+
+
 def _autostart_install_linux() -> int:
     desktop_dir = Path.home() / ".config" / "autostart"
     desktop_dir.mkdir(parents=True, exist_ok=True)
@@ -996,6 +1107,12 @@ def main() -> None:
                     help="register the tray watcher to launch on user login, then exit")
     ap.add_argument("--uninstall-autostart", action="store_true",
                     help="remove the autostart registration, then exit")
+    ap.add_argument("--register-claude-hook", action="store_true",
+                    help="register a SessionStart hook in ~/.claude/settings.json so the "
+                         "tray watcher starts when Claude opens (alternative to OS-login "
+                         "autostart). Idempotent. Then exit.")
+    ap.add_argument("--unregister-claude-hook", action="store_true",
+                    help="remove the SessionStart hook registered above, then exit")
     ap.add_argument("--flyout", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--pin", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--theme", choices=["light", "dark"], default="light",
@@ -1008,6 +1125,10 @@ def main() -> None:
         sys.exit(_autostart_install())
     if args.uninstall_autostart:
         sys.exit(_autostart_uninstall())
+    if args.register_claude_hook:
+        sys.exit(_claude_hook_install())
+    if args.unregister_claude_hook:
+        sys.exit(_claude_hook_uninstall())
 
     sessions_dir_str = args.sessions_dir or os.environ.get("CLAUDE_SESSIONS_DIR")
     sessions_dir = Path(sessions_dir_str) if sessions_dir_str else (
