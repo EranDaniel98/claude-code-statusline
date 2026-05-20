@@ -90,6 +90,79 @@ def find_transcript(session_id: str, cwd: str) -> Path | None:
     return None
 
 
+def _tool_in_flight(path: Path) -> str | None:
+    """Name of the tool whose `assistant/tool_use` has not yet been matched
+    by a `user/tool_result`, or None. Walks the tail forward, tracks the
+    last unresolved tool_use. Tail-only, so very old in-flight tools (>16KB
+    of intervening JSONL) won't be reported — acceptable in practice."""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as f:
+            if size > 16384:
+                f.seek(size - 16384)
+                f.readline()
+            tail = f.read()
+    except OSError:
+        return None
+    pending = None
+    for ln in tail.decode("utf-8", errors="replace").splitlines():
+        if not ln.strip():
+            continue
+        try:
+            d = json.loads(ln)
+        except (ValueError, TypeError):
+            continue
+        t = d.get("type")
+        msg = d.get("message")
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not (isinstance(content, list) and content):
+            continue
+        # An assistant turn can emit multiple tool_use entries in one message
+        # (parallel tools). Look at every item, not just the first.
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            ctype = item.get("type")
+            if t == "assistant" and ctype == "tool_use":
+                pending = item.get("name", "?")
+            elif t == "user" and ctype == "tool_result":
+                pending = None
+    return pending
+
+
+# psutil is optional; CPU% is shown when available, otherwise hidden.
+try:
+    import psutil as _psutil  # noqa: F401
+    _HAS_PSUTIL = True
+except ImportError:
+    _HAS_PSUTIL = False
+
+_cpu_proc_cache: dict[int, object] = {}
+
+
+def session_cpu_percent(pid: int) -> float | None:
+    """CPU% for the process `pid` (claude.exe). Returns None on first call
+    for a given pid (psutil needs two samples to compute a delta) and on
+    any error. May exceed 100% on multi-core systems; that's informative,
+    not a bug — clamp at display time if you care."""
+    if not _HAS_PSUTIL or pid <= 0:
+        return None
+    import psutil
+    try:
+        p = _cpu_proc_cache.get(pid)
+        if p is None or not p.is_running():
+            p = psutil.Process(pid)
+            _cpu_proc_cache[pid] = p
+            p.cpu_percent()  # priming sample; first real read is on next call
+            return None
+        return p.cpu_percent()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        _cpu_proc_cache.pop(pid, None)
+        return None
+
+
 def _last_meaningful_timestamp(path: Path) -> float | None:
     """POSIX timestamp of the last non-thinking JSONL entry, or None.
 
@@ -666,7 +739,7 @@ def run_flyout(args, sessions_dir: Path) -> None:
     root.attributes("-topmost", True)
     root.configure(bg=BG)
 
-    width = 360
+    width = 400
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
 
     container = tk.Frame(root, bg=BG, padx=16, pady=14,
@@ -711,8 +784,9 @@ def run_flyout(args, sessions_dir: Path) -> None:
             dot_color = SEV_HEX.get(sev, MUTED)
             is_focused = focused_sid and s.session_id == focused_sid
 
+            # Top row: marker, dot, project name, status word.
             row = tk.Frame(rows, bg=BG)
-            row.pack(fill="x", pady=3)
+            row.pack(fill="x", pady=(4, 0))
             tk.Label(row, text="▶" if is_focused else " ",
                      fg=ACCENT, bg=BG,
                      font=("Segoe UI", 10, "bold"), width=2).pack(side="left")
@@ -723,6 +797,29 @@ def run_flyout(args, sessions_dir: Path) -> None:
                      font=name_font).pack(side="left")
             tk.Label(row, text=status_word, fg=dot_color, bg=BG,
                      font=("Segoe UI", 9, "bold")).pack(side="right")
+
+            # Detail row: cpu%, age, tool-in-flight. Indented to align with
+            # the project name above. All muted so the top row reads first.
+            cpu = session_cpu_percent(s.pid)
+            age = s.transcript_age
+            tr_path = find_transcript(s.session_id, s.cwd) if s.session_id else None
+            tool = _tool_in_flight(tr_path) if tr_path else None
+
+            detail_parts = []
+            if cpu is not None:
+                detail_parts.append(f"cpu {cpu:>4.0f}%")
+            elif _HAS_PSUTIL:
+                detail_parts.append("cpu  —")
+            if age is not None:
+                detail_parts.append(f"age {fmt_elapsed(age)}")
+            if tool:
+                detail_parts.append(f"running: {tool}")
+            if detail_parts:
+                detail = tk.Frame(rows, bg=BG)
+                detail.pack(fill="x", padx=(36, 0), pady=(0, 2))
+                tk.Label(detail, text="   ".join(detail_parts),
+                         fg=MUTED, bg=BG,
+                         font=("Consolas", 9)).pack(side="left")
 
     def fit_and_position():
         root.update_idletasks()

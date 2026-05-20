@@ -98,7 +98,12 @@ The tray icon is a single colored circle whose color = the loudest severity acro
 
 **Right-click menu** — `Open` action (opens the info window), session-summary entries (read-only, no action — present for visual reference with normal-color text), and `Quit`.
 
-**Info window** — double-click the tray icon (or pick `Open` from the menu) to pop a small borderless light-themed window listing all sessions: colored dot, project name, status word. The focused session is bolded with `▶`. Auto-refreshes every ~700ms while open; closes on focus-loss or `Esc`. Rendered by a child process so it doesn't block the tray.
+**Info window** — double-click the tray icon (or pick `Open` from the menu) to pop a small borderless light-themed window listing all sessions. Each session shows:
+
+- Top row — colored dot, project name, status word; the focused session is bolded with `▶`.
+- Detail row (muted, monospace) — `cpu N%` (claude.exe CPU; `—` until psutil has two samples), `age Xm Ys` (transcript-mtime age, skipping thinking entries), and `running: <tool>` if an `assistant/tool_use` is still waiting on its `tool_result`. The CPU + tool combo disambiguates the silent-but-busy case: high CPU = thinking hard; near-zero with a tool name = blocked on that tool; near-zero with no tool = likely stuck on the API.
+
+Auto-refreshes every ~700ms while open; closes on focus-loss or `Esc`. Rendered by a child process so it doesn't block the tray. CPU% requires the optional `psutil` dep (`uv pip install psutil`).
 
 **Toast on escalation** — when a session crosses into `⚠ STUCK` or `▶ WAIT`, the watcher fires a desktop toast (`[project] STUCK` or `[project] WAIT`) in addition to the audible beep. Same backend per platform: WinRT on Windows, `osascript` on macOS, `notify-send` on Linux.
 

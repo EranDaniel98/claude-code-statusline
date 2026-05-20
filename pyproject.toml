@@ -24,7 +24,7 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-tray = ["pystray>=0.19", "pillow>=9"]
+tray = ["pystray>=0.19", "pillow>=9", "psutil>=5"]
 
 [project.scripts]
 claude-watcher = "watcher:main"
