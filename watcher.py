@@ -261,6 +261,17 @@ def beep() -> None:
             return
         except Exception:
             pass
+    elif sys.platform == "darwin":
+        # Terminal bell is muted in most Mac terminals; afplay a system sound.
+        import subprocess
+        try:
+            subprocess.Popen(
+                ["afplay", "/System/Library/Sounds/Glass.aiff"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            return
+        except Exception:
+            pass
     sys.stdout.write("\a")
     sys.stdout.flush()
 
@@ -543,14 +554,35 @@ def _autostart_install_macos() -> int:
 </plist>
 """
     plist_path.write_text(plist, encoding="utf-8")
-    print(f"Installed autostart: {plist_path}")
-    print("Activate with: launchctl load ~/Library/LaunchAgents/com.anthropic.claude-code-watcher.plist")
+    print(f"Installed autostart plist: {plist_path}")
+    # Try to load it now so it starts immediately and survives reboot.
+    import subprocess
+    try:
+        # Unload first in case a previous version is loaded; ignore failure.
+        subprocess.run(["launchctl", "unload", str(plist_path)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        r = subprocess.run(["launchctl", "load", str(plist_path)],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            print("Loaded into launchd; the watcher is starting now.")
+        else:
+            print(f"launchctl load returned {r.returncode}: {r.stderr.strip()}")
+            print(f"You may need to load it manually: launchctl load {plist_path}")
+    except Exception as e:
+        print(f"Auto-load failed: {e}")
+        print(f"Load manually: launchctl load {plist_path}")
     return 0
 
 
 def _autostart_uninstall_macos() -> int:
     plist_path = Path.home() / "Library" / "LaunchAgents" / "com.anthropic.claude-code-watcher.plist"
     if plist_path.exists():
+        import subprocess
+        try:
+            subprocess.run(["launchctl", "unload", str(plist_path)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
         plist_path.unlink()
         print(f"Removed: {plist_path}")
     else:
@@ -615,16 +647,20 @@ def run_tray(args, sessions_dir: Path) -> None:
         icon.stop()
 
     def open_flyout(_icon=None, _item=None):
-        creationflags = 0
-        if sys.platform == "win32":
-            creationflags = 0x08000000  # CREATE_NO_WINDOW
         cmd = [sys.executable, str(Path(__file__).resolve()), "--flyout",
                "--sessions-dir", str(sessions_dir),
                "--theme", state["theme"]]
         if state["pinned"]:
             cmd.append("--pin")
+        popen_kwargs: dict = {"close_fds": True}
+        if sys.platform == "win32":
+            popen_kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+        else:
+            # On macOS/Linux give the flyout its own session so it survives
+            # if the tray process is killed and isn't tied to our stdio.
+            popen_kwargs["start_new_session"] = True
         try:
-            subprocess.Popen(cmd, creationflags=creationflags, close_fds=True)
+            subprocess.Popen(cmd, **popen_kwargs)
         except Exception:
             pass
 
@@ -727,10 +763,35 @@ def run_tray(args, sessions_dir: Path) -> None:
 
     def setup(icon):
         icon.visible = True
+        if sys.platform == "darwin":
+            # Hide Python from the Dock so the menu-bar icon is the only UI.
+            # pystray brings in pyobjc transitively on macOS, so AppKit is
+            # available without an extra dep. No-op if anything's missing.
+            try:
+                from AppKit import NSApp, NSApplicationActivationPolicyAccessory
+                app = NSApp()
+                if app is not None:
+                    app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+            except Exception:
+                pass
         threading.Thread(target=poll_loop, daemon=True).start()
 
     print("Claude Code Watcher · tray icon active. Double-click for info, right-click → Quit.")
     icon.run(setup=setup)
+
+
+def _default_font_family() -> str:
+    """Platform's preferred sans-serif. Calibri isn't installed on Mac;
+    Helvetica is ubiquitous there and looks at home in Aqua. Linux gets
+    DejaVu Sans (almost universal)."""
+    if sys.platform == "darwin":
+        return "Helvetica"
+    if sys.platform == "win32":
+        return "Calibri"
+    return "DejaVu Sans"
+
+
+_FONT = _default_font_family()
 
 
 _FLYOUT_THEMES = {
@@ -739,10 +800,10 @@ _FLYOUT_THEMES = {
         "fg":     "#000000",
         "accent": "#0a7a7a",     # dark teal
         "muted":  "#777777",
-        "title_font":  ("Calibri", 11, "bold"),
-        "name_font":   ("Calibri", 11),
-        "detail_font": ("Calibri", 11),
-        "status_font": ("Calibri", 10, "bold"),
+        "title_font":  (_FONT, 11, "bold"),
+        "name_font":   (_FONT, 11),
+        "detail_font": (_FONT, 11),
+        "status_font": (_FONT, 10, "bold"),
         "uppercase_title": False,
         "border": True,
     },
@@ -752,10 +813,10 @@ _FLYOUT_THEMES = {
         "fg":     "#00e5ff",
         "accent": "#ffd700",     # gold
         "muted":  "#4d8499",
-        "title_font":  ("Calibri", 11, "bold"),
-        "name_font":   ("Calibri", 11, "bold"),
-        "detail_font": ("Calibri", 11),
-        "status_font": ("Calibri", 10, "bold"),
+        "title_font":  (_FONT, 11, "bold"),
+        "name_font":   (_FONT, 11, "bold"),
+        "detail_font": (_FONT, 11),
+        "status_font": (_FONT, 10, "bold"),
         "uppercase_title": True,
         "border": True,
     },
@@ -819,7 +880,7 @@ def run_flyout(args, sessions_dir: Path) -> None:
 
         if not sessions:
             tk.Label(rows, text="No active sessions", fg=MUTED, bg=BG,
-                     font=("Segoe UI", 9, "italic")).pack(anchor="w", pady=4)
+                     font=(_FONT, 10, "italic")).pack(anchor="w", pady=4)
             return
 
         def sort_key(s: SessionInfo) -> float:
@@ -836,7 +897,7 @@ def run_flyout(args, sessions_dir: Path) -> None:
             row = tk.Frame(rows, bg=BG)
             row.pack(fill="x", pady=(2, 0))
             tk.Label(row, text="●", fg=dot_color, bg=BG,
-                     font=("Calibri", 14)).pack(side="left", padx=(0, 6))
+                     font=(_FONT, 14)).pack(side="left", padx=(0, 6))
             name = s.project[:24]
             if theme["uppercase_title"]:
                 name = name.upper()
@@ -844,7 +905,7 @@ def run_flyout(args, sessions_dir: Path) -> None:
                      font=theme["name_font"]).pack(side="left")
             if snoozed:
                 tk.Label(row, text="zzz", fg=MUTED, bg=BG,
-                         font=("Calibri", 9, "italic")).pack(side="left", padx=(6, 0))
+                         font=(_FONT, 9, "italic")).pack(side="left", padx=(6, 0))
             tk.Label(row, text=status_word, fg=dot_color, bg=BG,
                      font=theme["status_font"]).pack(side="right")
 

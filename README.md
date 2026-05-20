@@ -112,13 +112,24 @@ Auto-refreshes every ~700ms while open; closes on focus-loss or `Esc`. Rendered 
 ### Autostart on login
 
 Register the tray watcher to launch automatically:
-```bash
-.venv/Scripts/python watcher.py --install-autostart   # Windows: HKCU…\Run
-.venv/bin/python  watcher.py --install-autostart      # macOS: ~/Library/LaunchAgents/*.plist
-                                                       # Linux: ~/.config/autostart/*.desktop
+
+**Windows:** writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\ClaudeCodeWatcher` pointing at a VBScript wrapper that invokes `pythonw.exe watcher.py --tray` with a hidden window (uv-built venvs ship `pythonw.exe` as a trampoline shim that flashes a console without the wrapper).
+```powershell
+.venv\Scripts\python watcher.py --install-autostart
 ```
 
-To remove: `python watcher.py --uninstall-autostart`. On Windows the registration uses `pythonw.exe` if present so no console window appears on login.
+**macOS:** writes `~/Library/LaunchAgents/com.anthropic.claude-code-watcher.plist` and `launchctl load`s it immediately, so the watcher starts now and at every login. The watcher hides itself from the Dock via `NSApplicationActivationPolicyAccessory`; only the menu-bar icon shows.
+```bash
+.venv/bin/python watcher.py --install-autostart
+```
+First time the watcher fires a toast, macOS will prompt you to allow notifications for the Python interpreter (System Settings → Notifications). Grant it once.
+
+**Linux:** writes `~/.config/autostart/claude-code-watcher.desktop` (XDG autostart). Most desktop environments honor it on next login.
+```bash
+.venv/bin/python watcher.py --install-autostart
+```
+
+To remove on any platform: `python watcher.py --uninstall-autostart`.
 
 ### Configurable thresholds
 
@@ -129,12 +140,19 @@ Override the classification thresholds via env vars (same vars read by `statusli
 | `CLAUDE_WATCHER_SLOW_SECONDS`  | `60`  | Age at which a busy session flips to `⌛ THINK` (yellow) |
 | `CLAUDE_WATCHER_STUCK_SECONDS` | `180` | Age at which it flips to `⚠ STUCK` (red) |
 
-### Manual launch on Windows
+### Manual launch (without autostart)
 
-If you don't use autostart, launch with `pythonw.exe` so no console window appears:
+**Windows** — use `pythonw.exe` so no console window appears:
 ```
-.venv/Scripts/pythonw watcher.py --tray
+.venv\Scripts\pythonw watcher.py --tray
 ```
+
+**macOS** — `python` is fine but you'll see a Dock icon while it runs. Either use `--install-autostart` (which hides the Dock icon) or run via `nohup` to detach from the terminal:
+```bash
+nohup .venv/bin/python watcher.py --tray > /dev/null 2>&1 &
+```
+
+**Linux** — same `nohup` pattern as macOS, or use `systemctl --user` for a real service.
 
 ---
 
