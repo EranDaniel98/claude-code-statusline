@@ -380,11 +380,6 @@ def run_tray(args, sessions_dir: Path) -> None:
     Layout = 'dot' uses a plain colored circle.
     Layout = 'count' uses a colored circle with the active-session count
     drawn in the center.
-
-    Double-click the tray icon (or pick 'Open' from the right-click menu)
-    to pop a flyout window listing all sessions. The flyout is rendered
-    by a child process (`python watcher.py --flyout`) so its tkinter
-    event loop does not contend with pystray's Win32 message pump.
     """
     try:
         import pystray  # noqa: F401
@@ -395,7 +390,6 @@ def run_tray(args, sessions_dir: Path) -> None:
         sys.exit(2)
 
     import pystray
-    import subprocess
     import threading
 
     dot_icons = {sev: _make_dot_icon(sev) for sev in ("idle", "normal", "warn", "alert")}
@@ -415,28 +409,10 @@ def run_tray(args, sessions_dir: Path) -> None:
         stop_event.set()
         icon.stop()
 
-    def open_flyout(_icon=None, _item=None):
-        # Detached child so the flyout outlives this method call but
-        # doesn't carry our stdin/stdout; CREATE_NO_WINDOW suppresses a
-        # cmd-window flash if the parent is python.exe (not pythonw.exe).
-        creationflags = 0
-        if sys.platform == "win32":
-            creationflags = 0x08000000  # CREATE_NO_WINDOW
-        try:
-            subprocess.Popen(
-                [sys.executable, str(Path(__file__).resolve()), "--flyout",
-                 "--sessions-dir", str(sessions_dir)],
-                creationflags=creationflags,
-                close_fds=True,
-            )
-        except Exception:
-            pass
-
     def menu_items():
         sessions = scan_sessions(sessions_dir)
-        items = [pystray.MenuItem("Open", open_flyout, default=True)]
+        items = []
         if sessions:
-            items.append(pystray.Menu.SEPARATOR)
             for s in sessions:
                 label = classify(s)[0].strip()
                 items.append(pystray.MenuItem(f"{s.project}: {label}", None, enabled=False))
@@ -480,99 +456,8 @@ def run_tray(args, sessions_dir: Path) -> None:
         icon.visible = True
         threading.Thread(target=poll_loop, daemon=True).start()
 
-    print("Claude Code Watcher · tray icon active. Double-click for flyout, right-click → Quit.")
+    print("Claude Code Watcher · tray icon active. Right-click → Quit to exit.")
     icon.run(setup=setup)
-
-
-def run_flyout(args, sessions_dir: Path) -> None:
-    """Render a borderless tk window listing all sessions; exit on focus-out
-    or Escape. Invoked as a child process by run_tray() on tray click."""
-    import tkinter as tk
-
-    root = tk.Tk()
-    root.title("Claude Code")
-    root.overrideredirect(True)
-    root.attributes("-topmost", True)
-    root.configure(bg="#1e1e1e")
-
-    SEV_HEX = {
-        "normal": "#4caf50",
-        "warn":   "#ffc107",
-        "alert":  "#f44336",
-        "idle":   "#9e9e9e",
-    }
-
-    width, height = 360, 220
-    sw = root.winfo_screenwidth()
-    sh = root.winfo_screenheight()
-    # Pin near the taskbar / tray on the bottom-right.
-    x = sw - width - 20
-    y = sh - height - 70
-    root.geometry(f"{width}x{height}+{x}+{y}")
-
-    container = tk.Frame(root, bg="#1e1e1e", padx=14, pady=12,
-                         highlightbackground="#444", highlightthickness=1)
-    container.pack(fill="both", expand=True)
-
-    tk.Label(container, text="Claude Code", fg="white", bg="#1e1e1e",
-             font=("Segoe UI", 11, "bold")).pack(anchor="w")
-
-    rows = tk.Frame(container, bg="#1e1e1e")
-    rows.pack(fill="both", expand=True, pady=(8, 0))
-
-    def render():
-        for w in rows.winfo_children():
-            w.destroy()
-        sessions = scan_sessions(sessions_dir)
-        focused = _focused_session(sessions)
-        focused_sid = focused.session_id if focused else None
-
-        if not sessions:
-            tk.Label(rows, text="No active sessions",
-                     fg="#777", bg="#1e1e1e",
-                     font=("Segoe UI", 9, "italic")).pack(anchor="w", pady=4)
-            return
-
-        def sort_key(s: SessionInfo):
-            is_focused = 0 if focused_sid and s.session_id == focused_sid else 1
-            age = s.transcript_age if s.transcript_age is not None else float("inf")
-            return (is_focused, age)
-
-        for s in sorted(sessions, key=sort_key):
-            sev = classify(s)[2]
-            color = SEV_HEX.get(sev, "#777")
-            is_focused = focused_sid and s.session_id == focused_sid
-            row = tk.Frame(rows, bg="#1e1e1e")
-            row.pack(fill="x", pady=2)
-            tk.Label(row, text="▶" if is_focused else "  ",
-                     fg="white", bg="#1e1e1e", width=2,
-                     font=("Segoe UI", 9)).pack(side="left")
-            tk.Label(row, text="●", fg=color, bg="#1e1e1e",
-                     font=("Segoe UI", 13)).pack(side="left", padx=(0, 8))
-            tk.Label(row, text=s.project[:24], fg="white", bg="#1e1e1e",
-                     font=("Segoe UI", 9, "bold" if is_focused else "normal")
-                     ).pack(side="left")
-            age = s.transcript_age
-            age_str = fmt_elapsed(age) if age is not None else "—"
-            tk.Label(row, text=age_str, fg="#aaa", bg="#1e1e1e",
-                     font=("Segoe UI", 9)).pack(side="right")
-
-    def tick():
-        try:
-            render()
-        except Exception:
-            pass
-        root.after(700, tick)
-
-    def close(_event=None):
-        root.destroy()
-
-    render()
-    root.bind("<FocusOut>", close)
-    root.bind("<Escape>", close)
-    root.after(700, tick)
-    root.focus_force()
-    root.mainloop()
 
 
 def run_tui(args, sessions_dir: Path) -> None:
@@ -607,7 +492,6 @@ def main() -> None:
     ap.add_argument("--layout", choices=["dot", "count"], default="count",
                     help="tray icon layout: 'dot' = plain colored circle, "
                          "'count' = colored circle with active-session count (default)")
-    ap.add_argument("--flyout", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     sessions_dir_str = args.sessions_dir or os.environ.get("CLAUDE_SESSIONS_DIR")
@@ -615,9 +499,7 @@ def main() -> None:
         Path.home() / ".claude" / "sessions"
     )
 
-    if args.flyout:
-        run_flyout(args, sessions_dir)
-    elif args.tray:
+    if args.tray:
         run_tray(args, sessions_dir)
     else:
         run_tui(args, sessions_dir)

@@ -101,8 +101,6 @@ Color = the loudest severity across all sessions (see [Status colors](#status-co
 
 **Tooltip** lists each session's classification. When a terminal window is the OS foreground, the most-recently-active session is sorted to the top with a `▶` marker — proxy for "the session you're probably looking at" (we can't read which tab inside Windows Terminal is active without UI Automation).
 
-**Click flyout** — double-click the tray icon (or pick `Open` from the right-click menu) to pop a small borderless window listing all sessions: colored dot, project name, last-activity age. The focused session is bolded with `▶`. The flyout closes on focus-loss or `Esc`. It's rendered by a child process so it doesn't block the tray.
-
 **Quit** — right-click → `Quit`.
 
 **Beeps** on STUCK/WAIT escalations same as the TUI mode (use `--no-sound` to silence).
