@@ -498,21 +498,46 @@ def _autostart_uninstall() -> int:
 _AUTOSTART_NAME = "ClaudeCodeWatcher"
 
 
-def _watcher_launch_command() -> str:
-    """Command line that launches the tray watcher silently.
-    Prefers pythonw on Windows to avoid a console window."""
+def _watcher_launch_vbs_path() -> Path:
+    """Path to the VBS launcher dropped next to watcher.py."""
+    return Path(__file__).resolve().parent / "_claude_code_watcher_launch.vbs"
+
+
+def _write_launch_vbs() -> Path:
+    """Drop a VBScript wrapper that launches the watcher with a hidden
+    window. Required because uv-built venvs ship `pythonw.exe` as a
+    trampoline shim that still flashes a console; wscript + WshShell.Run
+    style=0 forces a truly hidden window regardless of the target."""
     py = Path(sys.executable)
+    pyw = py.with_name("pythonw.exe")
+    if pyw.exists():
+        py = pyw
+    script_path = Path(__file__).resolve()
+    vbs_path = _watcher_launch_vbs_path()
+    # Inner Run arg is the command line for WshShell — quote each path.
+    inner = f'""{py}"" ""{script_path}"" --tray'
+    body = (
+        'Set WshShell = CreateObject("WScript.Shell")\r\n'
+        f'WshShell.Run "{inner}", 0, False\r\n'
+    )
+    vbs_path.write_text(body, encoding="utf-8")
+    return vbs_path
+
+
+def _watcher_launch_command() -> str:
+    """Command line registered in HKCU\\…\\Run. Goes through wscript so
+    the launch is truly windowless even with uv's trampoline pythonw."""
     if sys.platform == "win32":
-        pyw = py.with_name("pythonw.exe")
-        if pyw.exists():
-            py = pyw
-    return f'"{py}" "{Path(__file__).resolve()}" --tray'
+        vbs = _watcher_launch_vbs_path()
+        return f'wscript.exe "{vbs}"'
+    return f'"{sys.executable}" "{Path(__file__).resolve()}" --tray'
 
 
 def _autostart_install_windows() -> int:
     try:
-        import winreg
+        vbs = _write_launch_vbs()
         cmd = _watcher_launch_command()
+        import winreg
         with winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Run",
@@ -521,6 +546,7 @@ def _autostart_install_windows() -> int:
             winreg.SetValueEx(k, _AUTOSTART_NAME, 0, winreg.REG_SZ, cmd)
         print(f"Installed autostart (HKCU…\\Run\\{_AUTOSTART_NAME}):")
         print(f"  {cmd}")
+        print(f"Launcher: {vbs}")
         return 0
     except OSError as e:
         print(f"autostart install failed: {e}", file=sys.stderr)
@@ -540,6 +566,10 @@ def _autostart_uninstall_windows() -> int:
                 print(f"Removed autostart (HKCU…\\Run\\{_AUTOSTART_NAME})")
             except FileNotFoundError:
                 print("No autostart entry to remove.")
+        vbs = _watcher_launch_vbs_path()
+        if vbs.exists():
+            vbs.unlink()
+            print(f"Removed launcher: {vbs}")
         return 0
     except OSError as e:
         print(f"autostart uninstall failed: {e}", file=sys.stderr)
