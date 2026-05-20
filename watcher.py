@@ -554,6 +554,7 @@ def run_tray(args, sessions_dir: Path) -> None:
         sys.exit(2)
 
     import pystray
+    import subprocess
     import threading
 
     icons = {sev: _make_dot_icon(sev) for sev in ("idle", "normal", "warn", "alert")}
@@ -564,14 +565,32 @@ def run_tray(args, sessions_dir: Path) -> None:
         stop_event.set()
         icon.stop()
 
+    def open_flyout(_icon=None, _item=None):
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = 0x08000000  # CREATE_NO_WINDOW
+        try:
+            subprocess.Popen(
+                [sys.executable, str(Path(__file__).resolve()), "--flyout",
+                 "--sessions-dir", str(sessions_dir)],
+                creationflags=creationflags,
+                close_fds=True,
+            )
+        except Exception:
+            pass
+
     def menu_items():
         sessions = scan_sessions(sessions_dir)
-        items = []
+        items = [pystray.MenuItem("Open", open_flyout, default=True)]
         if sessions:
+            items.append(pystray.Menu.SEPARATOR)
             for s in sessions:
                 label = classify(s)[0].strip()
+                # Enabled with a no-op handler so the OS renders the text
+                # in normal (black) color rather than the disabled gray.
                 items.append(pystray.MenuItem(
-                    f"{s.project}: {label}", None, enabled=False
+                    f"{s.project}: {label}",
+                    lambda _i=None, _t=None: None,
                 ))
         items.append(pystray.Menu.SEPARATOR)
         items.append(pystray.MenuItem("Quit", on_quit))
@@ -620,8 +639,116 @@ def run_tray(args, sessions_dir: Path) -> None:
         icon.visible = True
         threading.Thread(target=poll_loop, daemon=True).start()
 
-    print("Claude Code Watcher · tray icon active. Right-click → Quit to exit.")
+    print("Claude Code Watcher · tray icon active. Double-click for info, right-click → Quit.")
     icon.run(setup=setup)
+
+
+def run_flyout(args, sessions_dir: Path) -> None:
+    """Borderless 'futuristic' info window listing all sessions.
+    Light minimalist hi-tech style; closes on focus-loss or Esc.
+    Spawned as a child process by run_tray() so its tkinter event loop
+    does not contend with pystray's Win32 message pump."""
+    import tkinter as tk
+
+    BG = "#f5f5f7"
+    FG = "#000000"
+    ACCENT = "#0066cc"
+    MUTED = "#777777"
+    SEV_HEX = {
+        "normal": "#4caf50",
+        "warn":   "#ffc107",
+        "alert":  "#f44336",
+        "idle":   "#9e9e9e",
+    }
+
+    root = tk.Tk()
+    root.overrideredirect(True)
+    root.attributes("-topmost", True)
+    root.configure(bg=BG)
+
+    width = 360
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+
+    container = tk.Frame(root, bg=BG, padx=16, pady=14,
+                         highlightbackground=ACCENT, highlightthickness=1)
+    container.pack(fill="both", expand=True)
+
+    header_row = tk.Frame(container, bg=BG)
+    header_row.pack(fill="x")
+    tk.Label(header_row, text="CLAUDE CODE", fg=FG, bg=BG,
+             font=("Segoe UI", 10, "bold")).pack(side="left")
+    timestamp = tk.Label(header_row, text="", fg=MUTED, bg=BG,
+                         font=("Segoe UI", 8))
+    timestamp.pack(side="right")
+
+    tk.Frame(container, bg=ACCENT, height=1).pack(fill="x", pady=(8, 8))
+
+    rows = tk.Frame(container, bg=BG)
+    rows.pack(fill="both", expand=True)
+
+    def render():
+        for w in rows.winfo_children():
+            w.destroy()
+        timestamp.config(text=time.strftime("%H:%M:%S"))
+        sessions = scan_sessions(sessions_dir)
+        focused = _focused_session(sessions)
+        focused_sid = focused.session_id if focused else None
+
+        if not sessions:
+            tk.Label(rows, text="No active sessions", fg=MUTED, bg=BG,
+                     font=("Segoe UI", 9, "italic")).pack(anchor="w", pady=4)
+            return
+
+        def sort_key(s: SessionInfo):
+            is_focused = 0 if focused_sid and s.session_id == focused_sid else 1
+            age = s.transcript_age if s.transcript_age is not None else float("inf")
+            return (is_focused, age)
+
+        for s in sorted(sessions, key=sort_key):
+            sev = classify(s)[2]
+            label = classify(s)[0].strip()
+            status_word = label.split()[-1] if " " in label else label
+            dot_color = SEV_HEX.get(sev, MUTED)
+            is_focused = focused_sid and s.session_id == focused_sid
+
+            row = tk.Frame(rows, bg=BG)
+            row.pack(fill="x", pady=3)
+            tk.Label(row, text="▶" if is_focused else " ",
+                     fg=ACCENT, bg=BG,
+                     font=("Segoe UI", 10, "bold"), width=2).pack(side="left")
+            tk.Label(row, text="●", fg=dot_color, bg=BG,
+                     font=("Segoe UI", 14)).pack(side="left", padx=(0, 8))
+            name_font = ("Segoe UI", 10, "bold" if is_focused else "normal")
+            tk.Label(row, text=s.project[:24], fg=FG, bg=BG,
+                     font=name_font).pack(side="left")
+            tk.Label(row, text=status_word, fg=dot_color, bg=BG,
+                     font=("Segoe UI", 9, "bold")).pack(side="right")
+
+    def fit_and_position():
+        root.update_idletasks()
+        h = container.winfo_reqheight() + 4
+        x = sw - width - 20
+        y = sh - h - 70
+        root.geometry(f"{width}x{h}+{x}+{y}")
+
+    def tick():
+        try:
+            render()
+            fit_and_position()
+        except Exception:
+            pass
+        root.after(700, tick)
+
+    def close(_event=None):
+        root.destroy()
+
+    render()
+    fit_and_position()
+    root.bind("<FocusOut>", close)
+    root.bind("<Escape>", close)
+    root.after(700, tick)
+    root.focus_force()
+    root.mainloop()
 
 
 def run_tui(args, sessions_dir: Path) -> None:
@@ -657,6 +784,7 @@ def main() -> None:
                     help="register the tray watcher to launch on user login, then exit")
     ap.add_argument("--uninstall-autostart", action="store_true",
                     help="remove the autostart registration, then exit")
+    ap.add_argument("--flyout", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     if args.install_autostart:
@@ -669,7 +797,9 @@ def main() -> None:
         Path.home() / ".claude" / "sessions"
     )
 
-    if args.tray:
+    if args.flyout:
+        run_flyout(args, sessions_dir)
+    elif args.tray:
         run_tray(args, sessions_dir)
     else:
         run_tui(args, sessions_dir)
