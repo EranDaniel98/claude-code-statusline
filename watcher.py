@@ -340,100 +340,6 @@ def _focused_session(sessions: list[SessionInfo]) -> SessionInfo | None:
     return min(candidates, key=key)
 
 
-def _focus_window_by_pid(pid: int) -> bool:
-    """Bring the topmost visible window owned by `pid` (or its ancestor
-    terminal) to the foreground. Returns True on success.
-
-    Windows-only. For Claude Code under Windows Terminal we walk up the
-    process tree because claude.exe itself doesn't own a window; the WT
-    host process does. Note: WT shows all tabs in one HWND, so we can
-    only focus the terminal window, not the specific tab within it.
-    """
-    if sys.platform != "win32" or pid <= 0:
-        return False
-    try:
-        import ctypes
-        from ctypes import wintypes
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
-
-        def parent_pid(p: int) -> int:
-            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            hproc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, p)
-            if not hproc:
-                return 0
-            try:
-                # NtQueryInformationProcess is the cleanest path, but for
-                # simplicity use Toolhelp32 snapshot.
-                TH32CS_SNAPPROCESS = 0x2
-                INVALID = 0xFFFFFFFF
-
-                class PROCESSENTRY32W(ctypes.Structure):
-                    _fields_ = [
-                        ("dwSize", wintypes.DWORD),
-                        ("cntUsage", wintypes.DWORD),
-                        ("th32ProcessID", wintypes.DWORD),
-                        ("th32DefaultHeapID", ctypes.c_void_p),
-                        ("th32ModuleID", wintypes.DWORD),
-                        ("cntThreads", wintypes.DWORD),
-                        ("th32ParentProcessID", wintypes.DWORD),
-                        ("pcPriClassBase", wintypes.LONG),
-                        ("dwFlags", wintypes.DWORD),
-                        ("szExeFile", wintypes.WCHAR * 260),
-                    ]
-
-                snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-                if snap == INVALID:
-                    return 0
-                try:
-                    entry = PROCESSENTRY32W()
-                    entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
-                    if not kernel32.Process32FirstW(snap, ctypes.byref(entry)):
-                        return 0
-                    while True:
-                        if entry.th32ProcessID == p:
-                            return entry.th32ParentProcessID
-                        if not kernel32.Process32NextW(snap, ctypes.byref(entry)):
-                            return 0
-                finally:
-                    kernel32.CloseHandle(snap)
-            finally:
-                kernel32.CloseHandle(hproc)
-
-        # Walk pid → parent → parent … looking for an ancestor that owns
-        # a visible window. Cap depth so a broken chain can't loop.
-        candidates = []
-        cursor = pid
-        for _ in range(6):
-            candidates.append(cursor)
-            cursor = parent_pid(cursor)
-            if cursor <= 0 or cursor in candidates:
-                break
-
-        found = [0]
-
-        @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
-        def enum_cb(hwnd, _lparam):
-            wpid = wintypes.DWORD()
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
-            if wpid.value in candidates and user32.IsWindowVisible(hwnd):
-                length = user32.GetWindowTextLengthW(hwnd)
-                if length > 0:  # skip invisible / titleless helper windows
-                    found[0] = hwnd
-                    return False
-            return True
-
-        user32.EnumWindows(enum_cb, 0)
-        if found[0]:
-            # SW_RESTORE in case window is minimized; then bring to front.
-            user32.ShowWindow(found[0], 9)
-            user32.SetForegroundWindow(found[0])
-            return True
-    except Exception:
-        return False
-    return False
-
-
 def _toast(title: str, body: str) -> None:
     """Fire a desktop notification. Best-effort, non-blocking.
     Spawns the platform notifier as a detached child so a slow OS call
@@ -658,13 +564,6 @@ def run_tray(args, sessions_dir: Path) -> None:
         stop_event.set()
         icon.stop()
 
-    def focus_session(pid: int):
-        # Returned as the callable passed to MenuItem — pystray invokes it with
-        # (icon, item). We just care about the pid captured at build time.
-        def _handler(_icon=None, _item=None):
-            _focus_window_by_pid(pid)
-        return _handler
-
     def menu_items():
         sessions = scan_sessions(sessions_dir)
         items = []
@@ -672,7 +571,7 @@ def run_tray(args, sessions_dir: Path) -> None:
             for s in sessions:
                 label = classify(s)[0].strip()
                 items.append(pystray.MenuItem(
-                    f"{s.project}: {label}", focus_session(s.pid)
+                    f"{s.project}: {label}", None, enabled=False
                 ))
         items.append(pystray.Menu.SEPARATOR)
         items.append(pystray.MenuItem("Quit", on_quit))

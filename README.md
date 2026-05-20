@@ -96,7 +96,7 @@ The tray icon is a single colored circle whose color = the loudest severity acro
 
 **Tooltip** lists each session's classification. When a terminal window is the OS foreground, the most-recently-active session is sorted to the top with a `▶` marker — proxy for "the session you're probably looking at" (we can't read which tab inside Windows Terminal is active without UI Automation).
 
-**Right-click menu** — each session is clickable; clicking brings that session's terminal window to the foreground. Windows Terminal hosts all tabs in one HWND, so this focuses the WT window — you may still need to switch tabs manually if multiple Claude windows live in the same WT. Plus a `Quit` item to exit the watcher.
+**Right-click menu** — shows each session as a disabled label (read-only summary), plus a `Quit` item to exit the watcher.
 
 **Toast on escalation** — when a session crosses into `⚠ STUCK` or `▶ WAIT`, the watcher fires a desktop toast (`[project] STUCK` or `[project] WAIT`) in addition to the audible beep. Same backend per platform: WinRT on Windows, `osascript` on macOS, `notify-send` on Linux.
 
