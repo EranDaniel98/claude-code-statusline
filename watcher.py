@@ -590,14 +590,22 @@ def _autostart_uninstall_macos() -> int:
     return 0
 
 
-def _venv_python_path() -> str:
-    """Return the venv's Python next to watcher.py, or sys.executable."""
+def _venv_python_path(prefer_windowless: bool = False) -> str:
+    """Return the venv's Python next to watcher.py, or sys.executable.
+    When `prefer_windowless` is set on Windows, prefer pythonw.exe so the
+    invoking process doesn't flash a console window."""
     project_root = Path(__file__).resolve().parent
     if sys.platform == "win32":
-        cand = project_root / ".venv" / "Scripts" / "python.exe"
+        cands = []
+        if prefer_windowless:
+            cands.append(project_root / ".venv" / "Scripts" / "pythonw.exe")
+        cands.append(project_root / ".venv" / "Scripts" / "python.exe")
     else:
-        cand = project_root / ".venv" / "bin" / "python"
-    return str(cand) if cand.exists() else sys.executable
+        cands = [project_root / ".venv" / "bin" / "python"]
+    for c in cands:
+        if c.exists():
+            return str(c)
+    return sys.executable
 
 
 def _claude_settings_path() -> Path:
@@ -605,8 +613,10 @@ def _claude_settings_path() -> Path:
 
 
 def _claude_hook_command() -> str:
-    """Quoted command string to put in settings.json hooks.SessionStart."""
-    py = _venv_python_path()
+    """Quoted command string to put in settings.json hooks.SessionStart.
+    Uses pythonw on Windows so Claude Code firing the hook doesn't
+    briefly flash a console window every session open."""
+    py = _venv_python_path(prefer_windowless=True)
     script = Path(__file__).resolve().parent / "hooks" / "launch_watcher.py"
     return f'"{py}" "{script}"'
 
@@ -619,6 +629,14 @@ def _claude_hook_install() -> int:
     if not script.exists():
         print(f"launch script missing: {script}", file=sys.stderr)
         return 1
+
+    # On Windows, ensure the VBS launcher exists so launch_watcher.py can
+    # spawn the watcher fully-hidden even with uv's trampoline pythonw.
+    if sys.platform == "win32":
+        try:
+            _write_launch_vbs()
+        except Exception as e:
+            print(f"warning: could not generate VBS launcher: {e}", file=sys.stderr)
 
     command = _claude_hook_command()
 
