@@ -21,9 +21,7 @@ When you run several Claude Code sessions in parallel terminals, it's easy to lo
 
 ## What it looks like
 
-```
-project-name | ● | Opus 4.7 1M | 13% (131k) | 5h:19% 7d:48% | 41s
-```
+![Statusline showing project name, green busy dot, model, context %, rate limits, and elapsed time](docs/statusline.png)
 
 | Segment       | Meaning                                                                                     |
 |---------------|---------------------------------------------------------------------------------------------|
@@ -39,6 +37,8 @@ The notification hook adds:
 - **Permission prompt** → warning beep + toast titled `[project] Permission needed`
 - **Idle prompt** (turn ended, awaiting input) → chime + toast titled `[project] Awaiting your input`
 - **Elicitation dialog** → asterisk beep + toast titled `[project] Question`
+
+![Windows toast notification with Claude Code title and body](docs/toast.png)
 
 ---
 
