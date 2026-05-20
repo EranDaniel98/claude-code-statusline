@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+*.log
+statusline-payload.json
+statusline-trace.log

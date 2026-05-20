@@ -1,0 +1,19 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "python ~/.claude/statusline.py",
+    "refreshInterval": 300
+  },
+  "hooks": {
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python ~/.claude/hooks/notify.py"
+          }
+        ]
+      }
+    ]
+  }
+}
