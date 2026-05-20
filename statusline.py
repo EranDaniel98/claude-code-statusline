@@ -12,6 +12,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 try:
@@ -20,13 +21,9 @@ except Exception:
     pass
 
 
-def fmt_elapsed(secs: float) -> str:
-    s = int(secs)
-    if s < 60:
-        return f"{s}s"
-    if s < 3600:
-        return f"{s // 60}m{s % 60:02d}s"
-    return f"{s // 3600}h{(s % 3600) // 60:02d}m"
+# Mirror watcher.py thresholds so the two surfaces classify identically.
+SLOW_THRESHOLD = 60.0
+STUCK_THRESHOLD = 180.0
 
 
 def ansi(text: str, code: str) -> str:
@@ -160,13 +157,80 @@ def _find_session_state(session_id: str) -> dict | None:
     return None
 
 
-def render_status(state: dict | None) -> str:
+def _last_meaningful_timestamp(transcript: str) -> float | None:
+    """POSIX timestamp of the last non-thinking JSONL entry, or None.
+
+    Thinking blocks land in the JSONL on completion and update file mtime,
+    which would otherwise mask genuine stuckness during a long reasoning turn.
+    We walk the tail backwards and skip `subtype == "thinking"` entries.
+    """
+    try:
+        size = os.path.getsize(transcript)
+        with open(transcript, "rb") as f:
+            if size > 65536:
+                f.seek(size - 65536)
+                f.readline()  # drop partial first line in the chunk
+            tail = f.read()
+    except OSError:
+        return None
+
+    for ln in reversed(tail.decode("utf-8", errors="replace").splitlines()):
+        if not ln.strip():
+            continue
+        try:
+            d = json.loads(ln)
+        except (ValueError, TypeError):
+            continue
+        msg = d.get("message")
+        if isinstance(msg, dict):
+            content = msg.get("content")
+            if (isinstance(content, list) and content
+                    and isinstance(content[0], dict)
+                    and content[0].get("type") == "thinking"):
+                continue
+        ts_str = d.get("timestamp")
+        if not ts_str:
+            continue
+        try:
+            return datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def _meaningful_activity_ts(transcript: str | None) -> float | None:
+    """Last meaningful activity as POSIX seconds. Falls back to file mtime
+    when the JSONL has no parseable non-thinking entries (empty/brand-new file)."""
+    if not transcript or not os.path.exists(transcript):
+        return None
+    ts = _last_meaningful_timestamp(transcript)
+    if ts is not None:
+        return ts
+    try:
+        return os.path.getmtime(transcript)
+    except OSError:
+        return None
+
+
+def _transcript_age(transcript: str | None) -> float | None:
+    ts = _meaningful_activity_ts(transcript)
+    if ts is None:
+        return None
+    return max(time.time() - ts, 0.0)
+
+
+def render_status(state: dict | None, transcript: str | None) -> str:
     status = state.get("status") if state else None
     if status == "waiting":
-        return ansi("WAIT", "1;31")
-    if status == "busy":
-        return ansi("●", "1;32")
-    return ""
+        return ansi("▶ WAIT", "1;31")
+    if status != "busy":
+        return ""
+    age = _transcript_age(transcript)
+    if age is not None and age >= STUCK_THRESHOLD:
+        return ansi("⚠ STUCK", "1;31")
+    if age is not None and age >= SLOW_THRESHOLD:
+        return ansi("⌛ THINK", "1;33")
+    return ansi("●", "1;32")
 
 
 def render_fast(data: dict) -> str:
@@ -195,14 +259,17 @@ def render_rate_limits(data: dict) -> str:
     return " ".join(chunks)
 
 
-def render_elapsed(transcript: str | None) -> str:
-    if not transcript or not os.path.exists(transcript):
+def render_last_activity(transcript: str | None) -> str:
+    ts = _meaningful_activity_ts(transcript)
+    if ts is None:
         return ""
-    try:
-        secs = time.time() - os.path.getmtime(transcript)
-    except OSError:
-        return ""
-    label = fmt_elapsed(secs)
+    now = time.time()
+    if ts > now:
+        # Future-dated timestamp (clock skew, NTP step, copied-with-preserved-timestamps).
+        # Collapse to "now" so we never display a wall-clock time in the future.
+        ts = now
+    secs = now - ts
+    label = "last " + time.strftime("%H:%M:%S", time.localtime(ts))
     if secs < 30:
         return ansi(label, "2;37")
     if secs < 120:
@@ -246,7 +313,7 @@ def main() -> None:
 
     parts = [ansi(project, "1;36")]
 
-    status_part = render_status(state)
+    status_part = render_status(state, data.get("transcript_path"))
     if status_part:
         parts.append(status_part)
 
@@ -264,9 +331,9 @@ def main() -> None:
     if rl_part:
         parts.append(rl_part)
 
-    elapsed_part = render_elapsed(data.get("transcript_path"))
-    if elapsed_part:
-        parts.append(elapsed_part)
+    last_activity_part = render_last_activity(data.get("transcript_path"))
+    if last_activity_part:
+        parts.append(last_activity_part)
 
     width = detect_terminal_width()
     if width and len(parts) > 1:

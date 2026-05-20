@@ -27,6 +27,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 try:
@@ -86,14 +87,56 @@ def find_transcript(session_id: str, cwd: str) -> Path | None:
     return None
 
 
+def _last_meaningful_timestamp(path: Path) -> float | None:
+    """POSIX timestamp of the last non-thinking JSONL entry, or None.
+
+    Skips `subtype == "thinking"` entries so extended-thinking writes don't
+    mask a session that's been silently reasoning. Matches statusline.py.
+    """
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as f:
+            if size > 65536:
+                f.seek(size - 65536)
+                f.readline()
+            tail = f.read()
+    except OSError:
+        return None
+    for ln in reversed(tail.decode("utf-8", errors="replace").splitlines()):
+        if not ln.strip():
+            continue
+        try:
+            d = json.loads(ln)
+        except (ValueError, TypeError):
+            continue
+        msg = d.get("message")
+        if isinstance(msg, dict):
+            content = msg.get("content")
+            if (isinstance(content, list) and content
+                    and isinstance(content[0], dict)
+                    and content[0].get("type") == "thinking"):
+                continue
+        ts_str = d.get("timestamp")
+        if not ts_str:
+            continue
+        try:
+            return datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
 def transcript_age(session_id: str, cwd: str) -> float | None:
     p = find_transcript(session_id, cwd)
     if not p:
         return None
-    try:
-        return time.time() - p.stat().st_mtime
-    except OSError:
-        return None
+    ts = _last_meaningful_timestamp(p)
+    if ts is None:
+        try:
+            ts = p.stat().st_mtime
+        except OSError:
+            return None
+    return max(time.time() - ts, 0.0)
 
 
 def scan_sessions(sessions_dir: Path) -> list[SessionInfo]:

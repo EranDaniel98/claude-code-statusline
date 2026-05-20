@@ -27,11 +27,11 @@ When you run several Claude Code sessions in parallel terminals, it's easy to lo
 | Segment       | Meaning                                                                                     |
 |---------------|---------------------------------------------------------------------------------------------|
 | `project-name`| `session_name` if set, else `cwd` basename. Truncates with `…` to fit terminal width.       |
-| `●` / `WAIT`  | Green `●` = session busy. Red `WAIT` = permission prompt pending. Hidden = idle.            |
+| `●` / `⌛ THINK` / `⚠ STUCK` / `▶ WAIT` | Session classification. Green `●` = busy, transcript fresh. Yellow `⌛ THINK` = busy, transcript silent ≥60s. Red `⚠ STUCK` = silent ≥180s. Red `▶ WAIT` = permission prompt pending. Hidden = idle. Same thresholds as `watcher.py`. |
 | `Opus 4.7 1M` | Model display name; `1M` suffix when 1M context is enabled.                                 |
 | `13% (131k)`  | Context used: percent + token count. Dim → yellow ≥60 → bold yellow ≥80 → red ≥90.          |
 | `5h:19% 7d:48%`| Rate-limit usage (5-hour / 7-day). Dim → yellow → red as it climbs.                        |
-| `41s`         | Seconds since the transcript JSONL was last touched. Dim <30s → yellow <2min → red ≥2min. This is your "is it stuck?" signal. |
+| `last 12:34:56`| Local wall-clock time of the last transcript event. Dim if <30s old at last paint → yellow <2min → red ≥2min. Frozen between Claude Code repaints by design — comparing a stale wall clock to your own is self-evidently stale, whereas a frozen "Ns" counter would lie. Run `watcher.py` for real-time ticking. |
 
 The notification hook adds:
 
@@ -177,7 +177,7 @@ See [`tests/CHECKLIST.md`](tests/CHECKLIST.md) for cross-window scenarios.
 
 - **Statusline reads stdin payload** Claude Code provides on every render: session id, transcript path, cwd, model, context window, rate limits.
 - **Busy state comes from `~/.claude/sessions/<PID>.json`** — Claude Code's `status` field there is the authoritative liveness signal (`idle` / `busy` / `waiting`).
-- **Elapsed is transcript JSONL mtime**, which only updates on message/tool completion (not during silent thinking). This is what makes it a stuck-detector.
+- **Last activity is the timestamp of the last non-thinking JSONL entry**, rendered as local wall-clock time. Extended-thinking blocks land in the JSONL and update file mtime, so naive `getmtime` would hide a session that's been silently reasoning for minutes. The statusline (and `watcher.py`'s classification, by the same logic) walks the tail of the JSONL backwards, skips `subtype=="thinking"` entries, and uses the previous entry's timestamp. Falls back to file mtime when no parseable non-thinking entries exist. Color buckets (dim/yellow/red) still classify freshness *at the last paint*.
 - **Toast AppId is registered in `HKCU:\SOFTWARE\Classes\AppUserModelId\Anthropic.ClaudeCode`** — Microsoft's documented way to register a standalone notifier without needing a Start Menu shortcut.
 - **Notification backends are platform-detected.** `hooks/notify.py` defines a `NotificationBackend` ABC with `WindowsBackend` / `MacOSBackend` / `LinuxBackend` implementations selected via `sys.platform`. Adding a new platform is one new class.
 - **The watcher polls externally**, free of Claude Code's repaint quirks. It scans `~/.claude/sessions/*.json` plus the matching transcript JSONLs in `~/.claude/projects/<encoded-cwd>/`, classifies each session, and beeps when severity *escalates* (debounced — won't beep continuously while a session sits in WAIT).

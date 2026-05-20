@@ -73,6 +73,28 @@ def transcript_file(age_seconds: float = 0):
         p.unlink(missing_ok=True)
 
 
+@contextmanager
+def jsonl_transcript(entries):
+    """entries: list of (age_seconds, is_thinking) tuples, oldest first."""
+    from datetime import datetime, timezone, timedelta
+    p = Path(tempfile.gettempdir()) / f"stl-jsonl-{uuid4().hex[:8]}.jsonl"
+    now = datetime.now(timezone.utc)
+    lines = []
+    for age, is_thinking in entries:
+        ts = (now - timedelta(seconds=age)).isoformat().replace("+00:00", "Z")
+        sub = "thinking" if is_thinking else "text"
+        lines.append(json.dumps({
+            "type": "assistant",
+            "timestamp": ts,
+            "message": {"content": [{"type": sub}]},
+        }))
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        yield str(p)
+    finally:
+        p.unlink(missing_ok=True)
+
+
 def payload(session_id="no-match", transcript_path="", **overrides) -> dict:
     base = {
         "session_id": session_id,
@@ -124,8 +146,25 @@ def main() -> None:
         with session_file("waiting") as sid, transcript_file(age_seconds=500) as tr:
             out = render(payload(sid, tr), columns=120)
             results.append(check(
-                "waiting session → WAIT", out,
-                lambda o: "WAIT" in visible(o), "WAIT present",
+                "waiting session → ▶ WAIT red", out,
+                lambda o: "\x1b[1;31m▶ WAIT\x1b[0m" in o,
+                "red '▶ WAIT' glyph",
+            ))
+
+        with session_file("busy") as sid, transcript_file(age_seconds=75) as tr:
+            out = render(payload(sid, tr), columns=120)
+            results.append(check(
+                "busy + ≥60s silent → ⌛ THINK yellow", out,
+                lambda o: "\x1b[1;33m⌛ THINK\x1b[0m" in o,
+                "yellow '⌛ THINK'",
+            ))
+
+        with session_file("busy") as sid, transcript_file(age_seconds=250) as tr:
+            out = render(payload(sid, tr), columns=120)
+            results.append(check(
+                "busy + ≥180s silent → ⚠ STUCK red", out,
+                lambda o: "\x1b[1;31m⚠ STUCK\x1b[0m" in o,
+                "red '⚠ STUCK'",
             ))
 
         with session_file("idle") as sid, transcript_file(age_seconds=500) as tr:
@@ -185,6 +224,80 @@ def main() -> None:
             "minimal payload renders without crash", out,
             lambda o: "Opus 4.7" in visible(o), "model name appears",
         ))
+
+        def last_activity_seg(o: str):
+            parts = o.split(" | ")
+            if not parts:
+                return None
+            m = re.match(r"(\x1b\[[0-9;]+m)(.*?)\x1b\[0m$", parts[-1])
+            return m.groups() if m else None
+
+        LABEL_RE = re.compile(r"last \d{2}:\d{2}:\d{2}")
+
+        with session_file("busy") as sid, transcript_file(age_seconds=5) as tr:
+            out = render(payload(sid, tr, context_window=None, rate_limits=None), columns=120)
+            seg = last_activity_seg(out)
+            results.append(check(
+                "last-activity <30s → dim 'last HH:MM:SS'", out,
+                lambda o: seg is not None and seg[0] == "\x1b[2;37m" and LABEL_RE.fullmatch(seg[1]) is not None,
+                "dim (2;37), label 'last HH:MM:SS'",
+            ))
+
+        with session_file("busy") as sid, transcript_file(age_seconds=75) as tr:
+            out = render(payload(sid, tr, context_window=None, rate_limits=None), columns=120)
+            seg = last_activity_seg(out)
+            results.append(check(
+                "last-activity 30-120s → yellow", out,
+                lambda o: seg is not None and seg[0] == "\x1b[33m" and LABEL_RE.fullmatch(seg[1]) is not None,
+                "yellow (33), label 'last HH:MM:SS'",
+            ))
+
+        with session_file("busy") as sid, transcript_file(age_seconds=250) as tr:
+            out = render(payload(sid, tr, context_window=None, rate_limits=None), columns=120)
+            seg = last_activity_seg(out)
+            results.append(check(
+                "last-activity ≥120s → bold red", out,
+                lambda o: seg is not None and seg[0] == "\x1b[1;31m" and LABEL_RE.fullmatch(seg[1]) is not None,
+                "red (1;31), label 'last HH:MM:SS'",
+            ))
+
+        with session_file("busy") as sid, transcript_file(age_seconds=-30) as tr:
+            out = render(payload(sid, tr, context_window=None, rate_limits=None), columns=120)
+            seg = last_activity_seg(out)
+            results.append(check(
+                "future mtime → clamped, dim 'last HH:MM:SS' (no future leak)", out,
+                lambda o: seg is not None and seg[0] == "\x1b[2;37m" and LABEL_RE.fullmatch(seg[1]) is not None,
+                "dim, valid HH:MM:SS (collapsed to now)",
+            ))
+
+        # JSONL with stale text + fresh thinking → status escalates because
+        # thinking entries are skipped when looking up last meaningful activity.
+        with session_file("busy") as sid, jsonl_transcript([(75, False), (5, True)]) as tr:
+            out = render(payload(sid, tr), columns=120)
+            results.append(check(
+                "fresh thinking + 75s-old text → ⌛ THINK (thinking skipped)", out,
+                lambda o: "\x1b[1;33m⌛ THINK\x1b[0m" in o,
+                "yellow '⌛ THINK' despite fresh thinking write",
+            ))
+
+        # Fresh non-thinking entry → status stays at ● BUSY.
+        with session_file("busy") as sid, jsonl_transcript([(75, True), (5, False)]) as tr:
+            out = render(payload(sid, tr), columns=120)
+            results.append(check(
+                "fresh text → green ●", out,
+                lambda o: "\x1b[1;32m●\x1b[0m" in o,
+                "green '●' (last meaningful entry is fresh)",
+            ))
+
+        # All-thinking transcript → fall back to file mtime so we don't
+        # falsely show STUCK on a brand-new turn that only contains thinking.
+        with session_file("busy") as sid, jsonl_transcript([(5, True), (3, True)]) as tr:
+            out = render(payload(sid, tr), columns=120)
+            results.append(check(
+                "only-thinking transcript → falls back to file mtime, green ●", out,
+                lambda o: "\x1b[1;32m●\x1b[0m" in o,
+                "green '●' from file-mtime fallback",
+            ))
     finally:
         shutil.rmtree(SESSIONS, ignore_errors=True)
 
