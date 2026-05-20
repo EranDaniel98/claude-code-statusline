@@ -92,12 +92,7 @@ uv venv .venv && uv pip install pystray pillow   # one-time, into the project ve
 .venv/bin/python  watcher.py --tray              # macOS / Linux
 ```
 
-**Layouts** (`--layout`):
-
-- `count` (default) — colored circle with the number of *active* (non-idle) sessions drawn inside.
-- `dot` — plain colored circle, no number. Pre-existing behavior.
-
-Color = the loudest severity across all sessions (see [Status colors](#status-colors)).
+The tray icon is a single colored circle whose color = the loudest severity across all your sessions (see [Status colors](#status-colors)).
 
 **Tooltip** lists each session's classification. When a terminal window is the OS foreground, the most-recently-active session is sorted to the top with a `▶` marker — proxy for "the session you're probably looking at" (we can't read which tab inside Windows Terminal is active without UI Automation).
 

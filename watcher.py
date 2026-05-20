@@ -238,11 +238,6 @@ def overall_severity(sessions: list[SessionInfo]) -> str:
     return "idle"
 
 
-def _active_count(sessions: list[SessionInfo]) -> int:
-    """Number of non-idle sessions."""
-    return sum(1 for s in sessions if s.status != "idle")
-
-
 _SEVERITY_COLORS = {
     "idle":   (158, 158, 158, 255),  # gray
     "normal": (76, 175, 80, 255),    # green
@@ -276,43 +271,12 @@ def build_tooltip(sessions: list[SessionInfo],
 
 
 def _make_dot_icon(severity: str):
-    """Simple colored circle (the --layout=dot option)."""
+    """Simple colored circle for the tray. Color reflects severity."""
     from PIL import Image, ImageDraw
     color = _SEVERITY_COLORS.get(severity, _SEVERITY_COLORS["idle"])
     size = 64
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     ImageDraw.Draw(img).ellipse((6, 6, size - 6, size - 6), fill=color)
-    return img
-
-
-def _make_count_icon(severity: str, count: int):
-    """Colored circle with active-session count drawn in the center.
-    Count >99 displays as '99+'. Empty when count==0."""
-    from PIL import Image, ImageDraw, ImageFont
-    color = _SEVERITY_COLORS.get(severity, _SEVERITY_COLORS["idle"])
-    size = 64
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    draw.ellipse((4, 4, size - 4, size - 4), fill=color)
-    if count > 0:
-        text = str(count) if count < 100 else "99+"
-        # Yellow background needs dark text for contrast; others use white.
-        text_color = (0, 0, 0) if severity == "warn" else (255, 255, 255)
-        font_size = {1: 40, 2: 32, 3: 24}.get(len(text), 24)
-        font = None
-        for candidate in ("arialbd.ttf", "arial.ttf", "DejaVuSans-Bold.ttf"):
-            try:
-                font = ImageFont.truetype(candidate, font_size)
-                break
-            except (OSError, IOError):
-                continue
-        if font is None:
-            font = ImageFont.load_default()
-        bbox = draw.textbbox((0, 0), text, font=font)
-        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        x = (size - tw) / 2 - bbox[0]
-        y = (size - th) / 2 - bbox[1]
-        draw.text((x, y), text, fill=text_color, font=font)
     return img
 
 
@@ -376,11 +340,7 @@ def _focused_session(sessions: list[SessionInfo]) -> SessionInfo | None:
 
 def run_tray(args, sessions_dir: Path) -> None:
     """Headless mode: drive a system tray icon from the polling loop.
-
-    Layout = 'dot' uses a plain colored circle.
-    Layout = 'count' uses a colored circle with the active-session count
-    drawn in the center.
-    """
+    Tray icon is a single colored circle; color = loudest severity."""
     try:
         import pystray  # noqa: F401
     except ImportError:
@@ -392,16 +352,7 @@ def run_tray(args, sessions_dir: Path) -> None:
     import pystray
     import threading
 
-    dot_icons = {sev: _make_dot_icon(sev) for sev in ("idle", "normal", "warn", "alert")}
-    count_icon_cache: dict[tuple, object] = {}
-
-    def get_icon(severity: str, count: int):
-        if args.layout == "dot":
-            return dot_icons[severity]
-        key = (severity, count)
-        if key not in count_icon_cache:
-            count_icon_cache[key] = _make_count_icon(severity, count)
-        return count_icon_cache[key]
+    icons = {sev: _make_dot_icon(sev) for sev in ("idle", "normal", "warn", "alert")}
 
     stop_event = threading.Event()
 
@@ -422,7 +373,7 @@ def run_tray(args, sessions_dir: Path) -> None:
 
     icon = pystray.Icon(
         "claude-code-watcher",
-        dot_icons["idle"],
+        icons["idle"],
         "Claude Code · starting",
         menu=pystray.Menu(lambda: menu_items()),
     )
@@ -433,11 +384,10 @@ def run_tray(args, sessions_dir: Path) -> None:
             try:
                 sessions = scan_sessions(sessions_dir)
                 sev = overall_severity(sessions)
-                count = _active_count(sessions)
                 focused = _focused_session(sessions)
                 focused_sid = focused.session_id if focused else None
 
-                icon.icon = get_icon(sev, count)
+                icon.icon = icons[sev]
                 icon.title = build_tooltip(sessions, focused_session_id=focused_sid)
 
                 curr_severity = {
@@ -489,9 +439,6 @@ def main() -> None:
                     help="do not beep on STUCK / WAIT transitions")
     ap.add_argument("--tray", action="store_true",
                     help="run headless with a system tray icon instead of the TUI table")
-    ap.add_argument("--layout", choices=["dot", "count"], default="count",
-                    help="tray icon layout: 'dot' = plain colored circle, "
-                         "'count' = colored circle with active-session count (default)")
     args = ap.parse_args()
 
     sessions_dir_str = args.sessions_dir or os.environ.get("CLAUDE_SESSIONS_DIR")
