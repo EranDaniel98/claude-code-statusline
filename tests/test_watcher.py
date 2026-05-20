@@ -104,6 +104,20 @@ def main() -> None:
         ok = len(tip) <= 120
         results.append(ok)
         print(f"[{'PASS' if ok else 'FAIL'}] build_tooltip length ≤120 (got {len(tip)})")
+
+        # --- _label_for_single ---
+        label_cases = [
+            (mk("busy", 1.0), "BUSY"),
+            (mk("busy", 90.0), "THINK"),
+            (mk("busy", 300.0), "STUCK"),
+            (mk("waiting"), "WAIT"),
+            (mk("idle"), ""),
+        ]
+        for s, expected in label_cases:
+            got = watcher._label_for_single(s)
+            ok = got == expected
+            results.append(ok)
+            print(f"[{'PASS' if ok else 'FAIL'}] _label_for_single({s.status}@{s.transcript_age}) = {got!r} (expected {expected!r})")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

@@ -94,8 +94,11 @@ uv venv .venv && uv pip install pystray pillow   # one-time, into the project ve
 
 **Layouts** (`--layout`):
 
-- `count` (default) — colored circle with the number of *active* (non-idle) sessions drawn inside.
-- `dot` — plain colored circle, no number. Pre-existing behavior.
+- `count` (default) — colored circle with text drawn inside:
+  - **Exactly 1 active session** → the status word: `BUSY` / `THINK` / `STUCK` / `WAIT` (4-5 chars, picked to stay readable when downsampled to 16-32px).
+  - **2+ active sessions** → the digit count (e.g. `3`; capped at `99+`).
+  - **0 active sessions** → empty colored circle.
+- `dot` — plain colored circle, no text. The pre-existing minimalist mode.
 
 Color = the loudest severity across all sessions (see [Status colors](#status-colors)).
 

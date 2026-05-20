@@ -285,20 +285,19 @@ def _make_dot_icon(severity: str):
     return img
 
 
-def _make_count_icon(severity: str, count: int):
-    """Colored circle with active-session count drawn in the center.
-    Count >99 displays as '99+'. Empty when count==0."""
+def _make_text_icon(severity: str, text: str):
+    """Colored circle with `text` drawn centered. Font size auto-shrinks
+    based on character count so short labels stay readable at tray size."""
     from PIL import Image, ImageDraw, ImageFont
     color = _SEVERITY_COLORS.get(severity, _SEVERITY_COLORS["idle"])
     size = 64
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     draw.ellipse((4, 4, size - 4, size - 4), fill=color)
-    if count > 0:
-        text = str(count) if count < 100 else "99+"
+    if text:
         # Yellow background needs dark text for contrast; others use white.
         text_color = (0, 0, 0) if severity == "warn" else (255, 255, 255)
-        font_size = {1: 40, 2: 32, 3: 24}.get(len(text), 24)
+        font_size = {1: 42, 2: 34, 3: 28, 4: 22, 5: 18}.get(len(text), 16)
         font = None
         for candidate in ("arialbd.ttf", "arial.ttf", "DejaVuSans-Bold.ttf"):
             try:
@@ -314,6 +313,23 @@ def _make_count_icon(severity: str, count: int):
         y = (size - th) / 2 - bbox[1]
         draw.text((x, y), text, fill=text_color, font=font)
     return img
+
+
+def _label_for_single(session: SessionInfo) -> str:
+    """Short label drawn inside the tray icon when exactly one session is
+    active. 4-5 chars max so it stays readable when downsampled to 16-32px."""
+    if session.status == "waiting":
+        return "WAIT"
+    if session.status == "busy":
+        age = session.transcript_age
+        if age is not None and age >= STUCK_THRESHOLD:
+            return "STUCK"
+        if age is not None and age >= SLOW_THRESHOLD:
+            return "THINK"
+        return "BUSY"
+    if session.status == "idle":
+        return ""
+    return session.status[:5].upper()
 
 
 _TERMINAL_PROCESS_NAMES = {
@@ -399,15 +415,24 @@ def run_tray(args, sessions_dir: Path) -> None:
     import threading
 
     dot_icons = {sev: _make_dot_icon(sev) for sev in ("idle", "normal", "warn", "alert")}
-    count_icon_cache: dict[tuple, object] = {}
+    text_icon_cache: dict[tuple, object] = {}
 
-    def get_icon(severity: str, count: int):
+    def get_icon(severity: str, sessions: list[SessionInfo]):
+        """count-layout icon: status word when exactly one session is active,
+        digit count when 2+, empty circle when 0."""
         if args.layout == "dot":
             return dot_icons[severity]
-        key = (severity, count)
-        if key not in count_icon_cache:
-            count_icon_cache[key] = _make_count_icon(severity, count)
-        return count_icon_cache[key]
+        active = [s for s in sessions if s.status != "idle"]
+        if len(active) == 1:
+            text = _label_for_single(active[0])
+        elif len(active) > 1:
+            text = str(len(active)) if len(active) < 100 else "99+"
+        else:
+            text = ""
+        key = (severity, text)
+        if key not in text_icon_cache:
+            text_icon_cache[key] = _make_text_icon(severity, text)
+        return text_icon_cache[key]
 
     stop_event = threading.Event()
 
@@ -457,11 +482,10 @@ def run_tray(args, sessions_dir: Path) -> None:
             try:
                 sessions = scan_sessions(sessions_dir)
                 sev = overall_severity(sessions)
-                count = _active_count(sessions)
                 focused = _focused_session(sessions)
                 focused_sid = focused.session_id if focused else None
 
-                icon.icon = get_icon(sev, count)
+                icon.icon = get_icon(sev, sessions)
                 icon.title = build_tooltip(sessions, focused_session_id=focused_sid)
 
                 curr_severity = {
