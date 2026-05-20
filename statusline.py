@@ -145,7 +145,8 @@ def render_context(data: dict) -> str:
 
 
 def _find_session_state(session_id: str) -> dict | None:
-    sessions_dir = Path.home() / ".claude" / "sessions"
+    override = os.environ.get("CLAUDE_SESSIONS_DIR")
+    sessions_dir = Path(override) if override else Path.home() / ".claude" / "sessions"
     if not sessions_dir.exists():
         return None
     for path in sessions_dir.glob("*.json"):

@@ -1,13 +1,15 @@
 """Statusline state matrix.
 
-Pipes synthetic payloads into statusline.py, verifies output for each state.
-Creates throwaway session/transcript files (uuid-suffixed, cleaned in finally).
+Pipes synthetic payloads into the repo's statusline.py, verifies output for
+each state. Sessions/transcript files live in an isolated tmpdir
+(CLAUDE_SESSIONS_DIR override) — no pollution of ~/.claude/sessions.
 
-Run: python ~/.claude/tests/test_statusline.py
+Run: python tests/test_statusline.py
 """
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -21,9 +23,9 @@ try:
 except Exception:
     pass
 
-ROOT = Path.home() / ".claude"
-STATUSLINE = ROOT / "statusline.py"
-SESSIONS = ROOT / "sessions"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+STATUSLINE = REPO_ROOT / "statusline.py"
+SESSIONS = Path(tempfile.mkdtemp(prefix="ccs-test-sessions-"))
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -33,6 +35,7 @@ def visible(s: str) -> str:
 
 def render(payload, columns=None) -> str:
     env = os.environ.copy()
+    env["CLAUDE_SESSIONS_DIR"] = str(SESSIONS)
     if columns is not None:
         env["COLUMNS"] = str(columns)
     elif "COLUMNS" in env:
@@ -109,78 +112,81 @@ def check(name: str, out: str, predicate, expected: str) -> bool:
 def main() -> None:
     results: list[bool] = []
 
-    with session_file("busy") as sid, transcript_file(age_seconds=1) as tr:
-        out = render(payload(sid, tr), columns=120)
+    try:
+        with session_file("busy") as sid, transcript_file(age_seconds=1) as tr:
+            out = render(payload(sid, tr), columns=120)
+            results.append(check(
+                "busy session → green ●", out,
+                lambda o: "\x1b[1;32m●" in o,
+                "green ● (code 1;32)",
+            ))
+
+        with session_file("waiting") as sid, transcript_file(age_seconds=500) as tr:
+            out = render(payload(sid, tr), columns=120)
+            results.append(check(
+                "waiting session → WAIT", out,
+                lambda o: "WAIT" in visible(o), "WAIT present",
+            ))
+
+        with session_file("idle") as sid, transcript_file(age_seconds=500) as tr:
+            out = render(payload(sid, tr), columns=120)
+            results.append(check(
+                "idle + stale → no status segment", out,
+                lambda o: "●" not in o and "WAIT" not in visible(o),
+                "no ● / no WAIT",
+            ))
+
+        with transcript_file(age_seconds=1) as tr:
+            out = render(payload("ghost-session", tr), columns=120)
+            results.append(check(
+                "no session match → no status segment", out,
+                lambda o: "●" not in o and "WAIT" not in visible(o),
+                "no status segment",
+            ))
+
+        out = render("not json {", columns=120)
         results.append(check(
-            "busy session → green ●", out,
-            lambda o: "\x1b[1;32m●" in o,
-            "green ● (code 1;32)",
+            "malformed JSON → 'claude' fallback", out,
+            lambda o: visible(o) == "claude", "literal 'claude'",
         ))
 
-    with session_file("waiting") as sid, transcript_file(age_seconds=500) as tr:
-        out = render(payload(sid, tr), columns=120)
+        long_name = "a-very-long-project-name-that-must-be-truncated"
+        with session_file("busy") as sid:
+            out = render(payload(sid, session_name=long_name), columns=60)
+            results.append(check(
+                "60col truncates project", out,
+                lambda o: len(visible(o)) <= 60 and "…" in visible(o),
+                "≤60 chars, contains …",
+            ))
+
+        with session_file("busy") as sid:
+            out = render(payload(sid, session_name=long_name), columns=80)
+            results.append(check(
+                "80col truncates project", out,
+                lambda o: len(visible(o)) <= 80,
+                "≤80 chars",
+            ))
+
+        with session_file("busy") as sid:
+            out = render(payload(sid, session_name="short"), columns=120)
+            results.append(check(
+                "120col no truncation needed", out,
+                lambda o: "…" not in visible(o), "no ellipsis",
+            ))
+
+        minimal = {
+            "session_id": "ghost",
+            "cwd": "C:\\test",
+            "model": {"display_name": "Opus 4.7"},
+            "workspace": {"current_dir": "C:\\test"},
+        }
+        out = render(minimal, columns=120)
         results.append(check(
-            "waiting session → WAIT", out,
-            lambda o: "WAIT" in visible(o), "WAIT present",
+            "minimal payload renders without crash", out,
+            lambda o: "Opus 4.7" in visible(o), "model name appears",
         ))
-
-    with session_file("idle") as sid, transcript_file(age_seconds=500) as tr:
-        out = render(payload(sid, tr), columns=120)
-        results.append(check(
-            "idle + stale → no status segment", out,
-            lambda o: "●" not in o and "WAIT" not in visible(o),
-            "no ● / no WAIT",
-        ))
-
-    with transcript_file(age_seconds=1) as tr:
-        out = render(payload("ghost-session", tr), columns=120)
-        results.append(check(
-            "no session match → no status (mtime fallback removed)", out,
-            lambda o: "●" not in o and "WAIT" not in visible(o),
-            "no status segment",
-        ))
-
-    out = render("not json {", columns=120)
-    results.append(check(
-        "malformed JSON → 'claude' fallback", out,
-        lambda o: visible(o) == "claude", "literal 'claude'",
-    ))
-
-    long_name = "a-very-long-project-name-that-must-be-truncated"
-    with session_file("busy") as sid:
-        out = render(payload(sid, session_name=long_name), columns=60)
-        results.append(check(
-            "60col truncates project", out,
-            lambda o: len(visible(o)) <= 60 and "…" in visible(o),
-            "≤60 chars, contains …",
-        ))
-
-    with session_file("busy") as sid:
-        out = render(payload(sid, session_name=long_name), columns=80)
-        results.append(check(
-            "80col truncates project", out,
-            lambda o: len(visible(o)) <= 80,
-            "≤80 chars",
-        ))
-
-    with session_file("busy") as sid:
-        out = render(payload(sid, session_name="short"), columns=120)
-        results.append(check(
-            "120col no truncation needed", out,
-            lambda o: "…" not in visible(o), "no ellipsis",
-        ))
-
-    minimal = {
-        "session_id": "ghost",
-        "cwd": "C:\\test",
-        "model": {"display_name": "Opus 4.7"},
-        "workspace": {"current_dir": "C:\\test"},
-    }
-    out = render(minimal, columns=120)
-    results.append(check(
-        "minimal payload renders without crash", out,
-        lambda o: "Opus 4.7" in visible(o), "model name appears",
-    ))
+    finally:
+        shutil.rmtree(SESSIONS, ignore_errors=True)
 
     passed = sum(results)
     total = len(results)

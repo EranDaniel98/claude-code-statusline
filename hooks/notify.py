@@ -1,18 +1,27 @@
-"""Notification hook: distinct sound + Windows toast per notification type.
+"""Notification hook: distinct sound + native toast per event type.
 
 Fires when Claude Code emits a notification (permission prompt, idle prompt, etc.).
 Goal: tell the user *which* of N parallel Claude Code windows needs them, without
 making them tab through every window.
 
-Set CLAUDE_QUIET=1 to silence.
+Selects a platform-appropriate backend automatically:
+  - Windows: winsound.MessageBeep + PowerShell WinRT toast (needs registered AppId)
+  - macOS:   afplay system sound + osascript display notification
+  - Linux:   paplay/aplay system sound + notify-send
+
+Env vars:
+  CLAUDE_QUIET=1   silence everything (no sound, no toast)
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
+from abc import ABC, abstractmethod
 from pathlib import Path
 
 LOG = Path.home() / ".claude" / "notification.log"
+APP_ID = "Anthropic.ClaudeCode"
 
 
 def classify(message: str, notif_type: str) -> str:
@@ -26,28 +35,25 @@ def classify(message: str, notif_type: str) -> str:
     return "other"
 
 
-def play_sound(kind: str) -> None:
-    try:
-        import winsound
-    except ImportError:
-        return
-    sounds = {
+class NotificationBackend(ABC):
+    @abstractmethod
+    def play_sound(self, kind: str) -> None: ...
+
+    @abstractmethod
+    def show_toast(self, title: str, body: str) -> None: ...
+
+
+# ── Windows ──────────────────────────────────────────────────────────────────
+
+class WindowsBackend(NotificationBackend):
+    _SOUND_MAP = {
         "permission_prompt": 0x30,
         "idle_prompt": 0x40,
         "elicitation_dialog": 0x20,
         "other": 0x0,
     }
-    try:
-        winsound.MessageBeep(sounds.get(kind, 0x0))
-    except Exception:
-        pass
 
-
-APP_ID = "Anthropic.ClaudeCode"
-
-
-def show_toast(title: str, body: str) -> None:
-    ps_script = r"""
+    _PS_SCRIPT = r"""
 $ErrorActionPreference='SilentlyContinue'
 try {
   $null = [Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime]
@@ -61,20 +67,118 @@ try {
   [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($env:TOAST_APP_ID).Show($toast)
 } catch {}
 """
-    env = os.environ.copy()
-    env["TOAST_TITLE"] = title
-    env["TOAST_BODY"] = body or ""
-    env["TOAST_APP_ID"] = APP_ID
-    try:
-        subprocess.Popen(
-            ["powershell.exe", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_script],
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    except Exception:
-        pass
+
+    def play_sound(self, kind: str) -> None:
+        try:
+            import winsound
+        except ImportError:
+            return
+        try:
+            winsound.MessageBeep(self._SOUND_MAP.get(kind, 0x0))
+        except Exception:
+            pass
+
+    def show_toast(self, title: str, body: str) -> None:
+        env = os.environ.copy()
+        env["TOAST_TITLE"] = title
+        env["TOAST_BODY"] = body or ""
+        env["TOAST_APP_ID"] = APP_ID
+        try:
+            subprocess.Popen(
+                ["powershell.exe", "-NoProfile", "-WindowStyle", "Hidden", "-Command", self._PS_SCRIPT],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception:
+            pass
+
+
+# ── macOS ────────────────────────────────────────────────────────────────────
+
+class MacOSBackend(NotificationBackend):
+    _SOUND_MAP = {
+        "permission_prompt": "Sosumi",
+        "idle_prompt": "Glass",
+        "elicitation_dialog": "Tink",
+        "other": "Pop",
+    }
+
+    def play_sound(self, kind: str) -> None:
+        name = self._SOUND_MAP.get(kind, "Pop")
+        path = f"/System/Library/Sounds/{name}.aiff"
+        if not os.path.exists(path):
+            return
+        try:
+            subprocess.Popen(
+                ["afplay", path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+
+    def show_toast(self, title: str, body: str) -> None:
+        safe_title = (title or "").replace('"', '\\"')
+        safe_body = (body or "").replace('"', '\\"')
+        script = f'display notification "{safe_body}" with title "{safe_title}"'
+        try:
+            subprocess.Popen(
+                ["osascript", "-e", script],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+
+
+# ── Linux ────────────────────────────────────────────────────────────────────
+
+class LinuxBackend(NotificationBackend):
+    _URGENCY_MAP = {
+        "permission_prompt": "critical",
+        "idle_prompt": "normal",
+        "elicitation_dialog": "normal",
+        "other": "low",
+    }
+
+    def play_sound(self, kind: str) -> None:
+        candidates = [
+            ["paplay", "/usr/share/sounds/freedesktop/stereo/message.oga"],
+            ["aplay", "-q", "/usr/share/sounds/alsa/Front_Center.wav"],
+        ]
+        for cmd in candidates:
+            if shutil.which(cmd[0]) and os.path.exists(cmd[-1]):
+                try:
+                    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+                return
+        sys.stdout.write("\a")
+        sys.stdout.flush()
+
+    def show_toast(self, title: str, body: str) -> None:
+        if not shutil.which("notify-send"):
+            return
+        urgency = self._URGENCY_MAP.get("other", "normal")
+        try:
+            subprocess.Popen(
+                ["notify-send", f"--urgency={urgency}", "--app-name=Claude Code",
+                 title or "Claude Code", body or ""],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+
+
+def get_backend() -> NotificationBackend:
+    if sys.platform == "win32":
+        return WindowsBackend()
+    if sys.platform == "darwin":
+        return MacOSBackend()
+    return LinuxBackend()
 
 
 def main() -> None:
@@ -93,15 +197,16 @@ def main() -> None:
 
     kind = classify(message, notif_type)
 
-    play_sound(kind)
-
     titles = {
         "permission_prompt": f"[{project}] Permission needed",
         "idle_prompt": f"[{project}] Awaiting your input",
         "elicitation_dialog": f"[{project}] Question",
         "other": f"[{project}] Claude",
     }
-    show_toast(titles.get(kind, titles["other"]), message[:200])
+
+    backend = get_backend()
+    backend.play_sound(kind)
+    backend.show_toast(titles.get(kind, titles["other"]), message[:200])
 
     try:
         with open(LOG, "a", encoding="utf-8") as f:
