@@ -321,27 +321,15 @@ _SEVERITY_COLORS = {
 }
 
 
-def build_tooltip(sessions: list[SessionInfo],
-                  focused_session_id: str | None = None) -> str:
-    """Multi-line tray tooltip. Capped at 120 chars (Windows NotifyIcon limit).
-
-    When `focused_session_id` is given, that session is sorted to the top
-    with a ▶ marker so the user can spot it without reading the list.
-    """
+def build_tooltip(sessions: list[SessionInfo]) -> str:
+    """Multi-line tray tooltip. Capped at 120 chars (Windows NotifyIcon limit)."""
     if not sessions:
         return "Claude Code · no sessions"
-    if focused_session_id:
-        focused = next((s for s in sessions if s.session_id == focused_session_id), None)
-        others = [s for s in sessions if s.session_id != focused_session_id]
-        ordered = ([focused] if focused else []) + others
-    else:
-        ordered = list(sessions)
     lines = ["Claude Code"]
-    for s in ordered:
+    for s in sessions:
         label = classify(s)[0].strip()
         proj = s.project[:18]
-        marker = "▶ " if focused_session_id and s.session_id == focused_session_id else "  "
-        lines.append(f"{marker}{proj}: {label}")
+        lines.append(f"  {proj}: {label}")
     return "\n".join(lines)[:120]
 
 
@@ -353,64 +341,6 @@ def _make_dot_icon(severity: str):
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     ImageDraw.Draw(img).ellipse((6, 6, size - 6, size - 6), fill=color)
     return img
-
-
-_TERMINAL_PROCESS_NAMES = {
-    "WindowsTerminal.exe", "cmd.exe", "powershell.exe", "pwsh.exe",
-    "conhost.exe", "wt.exe", "claude.exe", "node.exe",
-}
-
-
-def _foreground_is_claude_terminal() -> bool:
-    """Heuristic: is the OS foreground window a terminal/Claude process?
-    Win32-only. Returns False on non-Windows or on any error.
-
-    The 'which tab' question can't be answered without UI Automation, so
-    we settle for 'any terminal is foreground' and let `_focused_session`
-    pick the most-recently-active Claude as the focus proxy.
-    """
-    if sys.platform != "win32":
-        return False
-    try:
-        import ctypes
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
-        hwnd = user32.GetForegroundWindow()
-        if not hwnd:
-            return False
-        pid = ctypes.c_ulong()
-        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        hproc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
-        if not hproc:
-            return False
-        try:
-            buf = ctypes.create_unicode_buffer(260)
-            size = ctypes.c_ulong(260)
-            if kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size)):
-                exe = buf.value.split("\\")[-1]
-                return exe in _TERMINAL_PROCESS_NAMES
-        finally:
-            kernel32.CloseHandle(hproc)
-    except Exception:
-        return False
-    return False
-
-
-def _focused_session(sessions: list[SessionInfo]) -> SessionInfo | None:
-    """Proxy for 'which session is currently focused' — returns the
-    most-recently-active session, but only when a terminal is foreground
-    on Windows. Returns None otherwise (no focus marker shown)."""
-    if not _foreground_is_claude_terminal():
-        return None
-    candidates = [s for s in sessions if s.status in ("busy", "waiting")] or sessions
-    if not candidates:
-        return None
-
-    def key(s: SessionInfo) -> float:
-        return s.transcript_age if s.transcript_age is not None else float("inf")
-
-    return min(candidates, key=key)
 
 
 def _toast(title: str, body: str) -> None:
@@ -475,6 +405,22 @@ def _autostart_uninstall() -> int:
 
 
 _AUTOSTART_NAME = "ClaudeCodeWatcher"
+_CONFIG_PATH = Path.home() / ".claude" / "watcher.json"
+
+
+def _load_config() -> dict:
+    try:
+        return json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_config(cfg: dict) -> None:
+    try:
+        _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _watcher_launch_vbs_path() -> Path:
@@ -632,6 +578,14 @@ def run_tray(args, sessions_dir: Path) -> None:
 
     icons = {sev: _make_dot_icon(sev) for sev in ("idle", "normal", "warn", "alert")}
 
+    # Settings persist across runs in ~/.claude/watcher.json. CLI --theme
+    # still wins for the *initial* launch; the menu toggle overwrites it.
+    cfg = _load_config()
+    state = {
+        "theme": cfg.get("theme") or args.theme,
+        "pinned": bool(cfg.get("pin_flyout", False)),
+    }
+
     stop_event = threading.Event()
 
     def on_quit(icon, _item):
@@ -642,19 +596,38 @@ def run_tray(args, sessions_dir: Path) -> None:
         creationflags = 0
         if sys.platform == "win32":
             creationflags = 0x08000000  # CREATE_NO_WINDOW
+        cmd = [sys.executable, str(Path(__file__).resolve()), "--flyout",
+               "--sessions-dir", str(sessions_dir),
+               "--theme", state["theme"]]
+        if state["pinned"]:
+            cmd.append("--pin")
         try:
-            subprocess.Popen(
-                [sys.executable, str(Path(__file__).resolve()), "--flyout",
-                 "--sessions-dir", str(sessions_dir)],
-                creationflags=creationflags,
-                close_fds=True,
-            )
+            subprocess.Popen(cmd, creationflags=creationflags, close_fds=True)
         except Exception:
             pass
 
+    def toggle_dark(icon, _item):
+        state["theme"] = "dark" if state["theme"] != "dark" else "light"
+        cfg["theme"] = state["theme"]
+        _save_config(cfg)
+        icon.update_menu()
+
+    def toggle_pin(icon, _item):
+        state["pinned"] = not state["pinned"]
+        cfg["pin_flyout"] = state["pinned"]
+        _save_config(cfg)
+        icon.update_menu()
+
     def menu_items():
         sessions = scan_sessions(sessions_dir)
-        items = [pystray.MenuItem("Open", open_flyout, default=True)]
+        items = [
+            pystray.MenuItem("Open", open_flyout, default=True),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Dark theme", toggle_dark,
+                             checked=lambda _i: state["theme"] == "dark"),
+            pystray.MenuItem("Pin flyout", toggle_pin,
+                             checked=lambda _i: state["pinned"]),
+        ]
         if sessions:
             items.append(pystray.Menu.SEPARATOR)
             for s in sessions:
@@ -682,11 +655,9 @@ def run_tray(args, sessions_dir: Path) -> None:
             try:
                 sessions = scan_sessions(sessions_dir)
                 sev = overall_severity(sessions)
-                focused = _focused_session(sessions)
-                focused_sid = focused.session_id if focused else None
 
                 icon.icon = icons[sev]
-                icon.title = build_tooltip(sessions, focused_session_id=focused_sid)
+                icon.title = build_tooltip(sessions)
 
                 sess_by_key = {
                     s.session_id or f"pid{s.pid}": s for s in sessions
@@ -716,23 +687,55 @@ def run_tray(args, sessions_dir: Path) -> None:
     icon.run(setup=setup)
 
 
+_FLYOUT_THEMES = {
+    "light": {
+        "bg":     "#f5f5f7",
+        "fg":     "#000000",
+        "accent": "#0a7a7a",     # dark teal
+        "muted":  "#777777",
+        "title_font":  ("Calibri", 11, "bold"),
+        "name_font":   ("Calibri", 11),
+        "detail_font": ("Calibri", 11),
+        "status_font": ("Calibri", 10, "bold"),
+        "uppercase_title": False,
+        "border": True,
+    },
+    "dark": {
+        # Dark neon: deep blue-black, cyan text, gold accents.
+        "bg":     "#0a0a14",
+        "fg":     "#00e5ff",
+        "accent": "#ffd700",     # gold
+        "muted":  "#4d8499",
+        "title_font":  ("Calibri", 11, "bold"),
+        "name_font":   ("Calibri", 11, "bold"),
+        "detail_font": ("Calibri", 11),
+        "status_font": ("Calibri", 10, "bold"),
+        "uppercase_title": True,
+        "border": True,
+    },
+}
+
+_SEV_HEX = {
+    "normal": "#4caf50",
+    "warn":   "#ffc107",
+    "alert":  "#f44336",
+    "idle":   "#9e9e9e",
+}
+
+
 def run_flyout(args, sessions_dir: Path) -> None:
     """Borderless 'futuristic' info window listing all sessions.
-    Light minimalist hi-tech style; closes on focus-loss or Esc.
+    Theme via --theme {light,dark}; closes on focus-loss or Esc.
     Spawned as a child process by run_tray() so its tkinter event loop
     does not contend with pystray's Win32 message pump."""
     import tkinter as tk
 
-    BG = "#f5f5f7"
-    FG = "#000000"
-    ACCENT = "#0066cc"
-    MUTED = "#777777"
-    SEV_HEX = {
-        "normal": "#4caf50",
-        "warn":   "#ffc107",
-        "alert":  "#f44336",
-        "idle":   "#9e9e9e",
-    }
+    theme = _FLYOUT_THEMES.get(args.theme, _FLYOUT_THEMES["light"])
+    BG = theme["bg"]
+    FG = theme["fg"]
+    ACCENT = theme["accent"]
+    MUTED = theme["muted"]
+    SEV_HEX = _SEV_HEX
 
     root = tk.Tk()
     root.overrideredirect(True)
@@ -742,19 +745,21 @@ def run_flyout(args, sessions_dir: Path) -> None:
     width = 400
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
 
-    container = tk.Frame(root, bg=BG, padx=16, pady=14,
-                         highlightbackground=ACCENT, highlightthickness=1)
+    container = tk.Frame(root, bg=BG, padx=10, pady=8,
+                         highlightbackground=ACCENT,
+                         highlightthickness=1 if theme.get("border") else 0)
     container.pack(fill="both", expand=True)
 
     header_row = tk.Frame(container, bg=BG)
     header_row.pack(fill="x")
-    tk.Label(header_row, text="CLAUDE CODE", fg=FG, bg=BG,
-             font=("Segoe UI", 10, "bold")).pack(side="left")
+    title_text = "CLAUDE.CODE" if theme["uppercase_title"] else "CLAUDE CODE"
+    tk.Label(header_row, text=title_text, fg=FG, bg=BG,
+             font=theme["title_font"]).pack(side="left")
     timestamp = tk.Label(header_row, text="", fg=MUTED, bg=BG,
-                         font=("Segoe UI", 8))
+                         font=theme["detail_font"])
     timestamp.pack(side="right")
 
-    tk.Frame(container, bg=ACCENT, height=1).pack(fill="x", pady=(8, 8))
+    tk.Frame(container, bg=ACCENT, height=1).pack(fill="x", pady=(5, 4))
 
     rows = tk.Frame(container, bg=BG)
     rows.pack(fill="both", expand=True)
@@ -764,39 +769,33 @@ def run_flyout(args, sessions_dir: Path) -> None:
             w.destroy()
         timestamp.config(text=time.strftime("%H:%M:%S"))
         sessions = scan_sessions(sessions_dir)
-        focused = _focused_session(sessions)
-        focused_sid = focused.session_id if focused else None
 
         if not sessions:
             tk.Label(rows, text="No active sessions", fg=MUTED, bg=BG,
                      font=("Segoe UI", 9, "italic")).pack(anchor="w", pady=4)
             return
 
-        def sort_key(s: SessionInfo):
-            is_focused = 0 if focused_sid and s.session_id == focused_sid else 1
-            age = s.transcript_age if s.transcript_age is not None else float("inf")
-            return (is_focused, age)
+        def sort_key(s: SessionInfo) -> float:
+            return s.transcript_age if s.transcript_age is not None else float("inf")
 
         for s in sorted(sessions, key=sort_key):
             sev = classify(s)[2]
             label = classify(s)[0].strip()
             status_word = label.split()[-1] if " " in label else label
             dot_color = SEV_HEX.get(sev, MUTED)
-            is_focused = focused_sid and s.session_id == focused_sid
 
-            # Top row: marker, dot, project name, status word.
+            # Top row: dot, project name, status word.
             row = tk.Frame(rows, bg=BG)
-            row.pack(fill="x", pady=(4, 0))
-            tk.Label(row, text="▶" if is_focused else " ",
-                     fg=ACCENT, bg=BG,
-                     font=("Segoe UI", 10, "bold"), width=2).pack(side="left")
+            row.pack(fill="x", pady=(2, 0))
             tk.Label(row, text="●", fg=dot_color, bg=BG,
-                     font=("Segoe UI", 14)).pack(side="left", padx=(0, 8))
-            name_font = ("Segoe UI", 10, "bold" if is_focused else "normal")
-            tk.Label(row, text=s.project[:24], fg=FG, bg=BG,
-                     font=name_font).pack(side="left")
+                     font=("Calibri", 14)).pack(side="left", padx=(0, 6))
+            name = s.project[:24]
+            if theme["uppercase_title"]:
+                name = name.upper()
+            tk.Label(row, text=name, fg=FG, bg=BG,
+                     font=theme["name_font"]).pack(side="left")
             tk.Label(row, text=status_word, fg=dot_color, bg=BG,
-                     font=("Segoe UI", 9, "bold")).pack(side="right")
+                     font=theme["status_font"]).pack(side="right")
 
             # Detail row: cpu%, age, tool-in-flight. Indented to align with
             # the project name above. All muted so the top row reads first.
@@ -816,10 +815,10 @@ def run_flyout(args, sessions_dir: Path) -> None:
                 detail_parts.append(f"running: {tool}")
             if detail_parts:
                 detail = tk.Frame(rows, bg=BG)
-                detail.pack(fill="x", padx=(36, 0), pady=(0, 2))
+                detail.pack(fill="x", padx=(22, 0), pady=(0, 1))
                 tk.Label(detail, text="   ".join(detail_parts),
                          fg=MUTED, bg=BG,
-                         font=("Consolas", 9)).pack(side="left")
+                         font=theme["detail_font"]).pack(side="left")
 
     def fit_and_position():
         root.update_idletasks()
@@ -841,7 +840,8 @@ def run_flyout(args, sessions_dir: Path) -> None:
 
     render()
     fit_and_position()
-    root.bind("<FocusOut>", close)
+    if not args.pin:
+        root.bind("<FocusOut>", close)
     root.bind("<Escape>", close)
     root.after(700, tick)
     root.focus_force()
@@ -882,6 +882,11 @@ def main() -> None:
     ap.add_argument("--uninstall-autostart", action="store_true",
                     help="remove the autostart registration, then exit")
     ap.add_argument("--flyout", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--pin", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--theme", choices=["light", "dark"], default="light",
+                    help="info-window theme: 'light' (minimalist hi-tech, black on near-white) "
+                         "or 'dark' (neon: cyan on deep blue, magenta accents). The tray's "
+                         "right-click menu has runtime toggles that overwrite this.")
     args = ap.parse_args()
 
     if args.install_autostart:

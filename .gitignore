@@ -5,3 +5,5 @@ __pycache__/
 statusline-payload.json
 statusline-trace.log
 _claude_code_watcher_launch.vbs
+*.egg-info/
+uv.lock
