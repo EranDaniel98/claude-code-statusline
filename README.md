@@ -1,10 +1,11 @@
 # claude-code-statusline
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6.svg)](#requirements)
+[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-blue.svg)](#requirements)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](#requirements)
+[![tests](https://github.com/EranDaniel98/claude-code-statusline/actions/workflows/test.yml/badge.svg)](https://github.com/EranDaniel98/claude-code-statusline/actions/workflows/test.yml)
 
-Statusline + notification hook for [Claude Code](https://claude.com/claude-code) on Windows.
+Statusline + notification hook + external watcher for [Claude Code](https://claude.com/claude-code).
 
 Tells you at a glance which of your parallel Claude Code windows is busy, idle, or waiting for permission — and surfaces toast notifications when one needs your attention.
 
@@ -40,61 +41,83 @@ The notification hook adds:
 
 ![Windows toast notification with Claude Code title and body](docs/toast.png)
 
+The **external watcher** (`watcher.py`) is the answer to "is anything actually stuck?" — Claude Code refreshes the in-TUI statusline sparsely during silent work, so the dot can lie. Run the watcher in a separate terminal and it polls every session on its own schedule, flips sessions from `● BUSY` → `⌛ THINK` → `⚠ STUCK` as transcripts stay silent, and beeps when a session escalates to STUCK or WAIT:
+
+```
+Claude Code Watcher · 2026-05-20 11:45:12
+──────────────────────────────────────────────────────────────────────────────
+    PID  STATE       PROJECT                           ELAPSED
+──────────────────────────────────────────────────────────────────────────────
+  25632  ● BUSY      Add progress indicator                 3s
+  28104  ⌛ THINK     Other Project                       1m22s
+  31840  ⚠ STUCK     Doing Hard Thing                    4m05s
+  19200  ▶ WAIT      Yet Another                         12s
+──────────────────────────────────────────────────────────────────────────────
+```
+
+Run with:
+```bash
+python watcher.py                 # default 300ms poll
+python watcher.py --no-sound      # silent
+python watcher.py --interval 1.0  # slower poll
+```
+
 ---
 
 ## Requirements
 
-- Windows 10 or 11
-- Python 3.10+ on `PATH`
-- Claude Code installed
+- **Statusline + watcher**: any OS with Python 3.10+ and Claude Code.
+- **Notification hook**: cross-platform via auto-detected backend.
+  - **Windows 10/11** — toasts via WinRT (needs the bundled AppId registration); sounds via `winsound.MessageBeep`.
+  - **macOS** — toasts via `osascript display notification`; sounds via `afplay` against `/System/Library/Sounds/`.
+  - **Linux** — toasts via `notify-send` (install `libnotify`); sounds via `paplay` (PulseAudio) or `aplay` (ALSA), falling back to terminal bell.
 
 ---
 
 ## Install
 
-### Automated (recommended)
+### Automated (Windows, recommended)
 
 ```powershell
 git clone https://github.com/EranDaniel98/claude-code-statusline.git
 cd claude-code-statusline
 .\scripts\install.ps1
+# or .\scripts\install.ps1 -DryRun  to preview without writing anything
 ```
 
 The script:
 1. Copies `statusline.py` and `hooks/notify.py` into `~/.claude/` (backing up any existing files).
-2. Registers the `Anthropic.ClaudeCode` AppId in the Windows registry (required for toasts to display — Windows silently drops toasts from unregistered AppIds).
-3. Prints the JSON snippet you need to merge into `~/.claude/settings.json`.
+2. Registers the `Anthropic.ClaudeCode` AppId so Windows actually displays toasts (Windows silently drops toasts from unregistered AppIds).
+3. **Deep-merges `settings.example.json` into `~/.claude/settings.json`** with a `.bak` of your old file. Existing unrelated settings (other hooks, custom rules) are preserved.
 
-Then merge the printed snippet into `~/.claude/settings.json` and restart any open Claude Code window.
+Restart any open Claude Code window after install.
 
-### Manual
+### Manual (any platform)
 
-1. Copy files:
+1. Copy files into `~/.claude/`:
+
+   **Windows (PowerShell):**
    ```powershell
    Copy-Item statusline.py "$env:USERPROFILE\.claude\statusline.py"
    New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.claude\hooks" | Out-Null
    Copy-Item hooks\notify.py "$env:USERPROFILE\.claude\hooks\notify.py"
    ```
 
-2. Register the toast AppId:
+   **macOS / Linux:**
+   ```bash
+   mkdir -p ~/.claude/hooks
+   cp statusline.py ~/.claude/statusline.py
+   cp hooks/notify.py ~/.claude/hooks/notify.py
+   ```
+
+2. (Windows only) Register the toast AppId:
    ```powershell
    .\scripts\register-app-id.ps1
    ```
 
-3. Merge the contents of `settings.example.json` into `~/.claude/settings.json`:
-   ```json
-   {
-     "statusLine": {
-       "type": "command",
-       "command": "python ~/.claude/statusline.py",
-       "refreshInterval": 300
-     },
-     "hooks": {
-       "Notification": [
-         { "hooks": [{ "type": "command", "command": "python ~/.claude/hooks/notify.py" }] }
-       ]
-     }
-   }
+3. Merge `settings.example.json` into `~/.claude/settings.json` (the included helper does a deep-merge with backup, on any OS):
+   ```bash
+   python scripts/merge_settings.py settings.example.json
    ```
 
 4. Restart any open Claude Code window.
@@ -103,11 +126,13 @@ Then merge the printed snippet into `~/.claude/settings.json` and restart any op
 
 ## Verify
 
-```powershell
-# Optionally copy tests into ~/.claude/tests/ — or run them from the repo:
-python tests\test_statusline.py    # scripted state matrix; should print "9/9 passed"
-python tests\test_notify.py        # fires 3 toasts + 3 sounds
-python tests\test_colors.py        # renders the dot/WAIT states
+From the repo root (no install required):
+
+```bash
+python tests/test_statusline.py    # state matrix; should print "9/9 passed"
+python tests/test_watcher.py       # watcher logic; should print "7/7 passed"
+python tests/test_notify.py        # fires 3 toasts + 3 sounds (manual confirm)
+python tests/test_colors.py        # renders the dot/WAIT states
 ```
 
 Then open a Claude Code window and confirm:
@@ -124,6 +149,7 @@ See [`tests/CHECKLIST.md`](tests/CHECKLIST.md) for cross-window scenarios.
 |--------------------------------|---------------------------------------------------------------------------------|
 | `CLAUDE_QUIET=1`               | Silence the notification hook (no sounds, no toasts).                           |
 | `CLAUDE_STATUSLINE_DEBUG=1`    | Dump the raw statusline payload to `~/.claude/statusline-payload.json`.         |
+| `CLAUDE_SESSIONS_DIR=<path>`   | Override the sessions dir read by the statusline + watcher (default `~/.claude/sessions`). Useful for tests and isolated environments. |
 | `COLUMNS=N`                    | Force terminal width (otherwise autodetected via `CONOUT$` on Windows).         |
 
 ---
@@ -142,8 +168,8 @@ See [`tests/CHECKLIST.md`](tests/CHECKLIST.md) for cross-window scenarios.
 
 ## Known limitations
 
-- **Sparse refresh during silent work.** Claude Code doesn't fire statusline refreshes on the `refreshInterval` timer reliably during long thinking turns or long tool calls — repaints fire on state events (start/end of turn, permission prompts). The dot accurately reflects state *at the last paint*, not in real time. For "is it stuck?", trust the `elapsed` segment (red at ≥2min) which is more likely to repaint on heartbeat refreshes.
-- **Windows-only.** The notification hook uses `winsound` + PowerShell WinRT. `statusline.py` itself is mostly portable, but the terminal-width detection prefers `CONOUT$` on Windows.
+- **Sparse refresh during silent work.** Claude Code doesn't fire statusline refreshes on the `refreshInterval` timer reliably during long thinking turns or long tool calls — repaints fire on state events (start/end of turn, permission prompts). The dot accurately reflects state *at the last paint*, not in real time. **Run `watcher.py` in a separate terminal** to get reliable real-time "stuck" detection; it polls on its own schedule and doesn't depend on Claude Code's repaint cadence.
+- **Toast latency on Windows.** `hooks/notify.py` spawns a fresh PowerShell per notification (~300ms startup). Fire-and-forget via `Popen` so it doesn't block, but the toast itself appears ~300ms after the event. A persistent helper would be cleaner — future work.
 
 ---
 
@@ -153,6 +179,8 @@ See [`tests/CHECKLIST.md`](tests/CHECKLIST.md) for cross-window scenarios.
 - **Busy state comes from `~/.claude/sessions/<PID>.json`** — Claude Code's `status` field there is the authoritative liveness signal (`idle` / `busy` / `waiting`).
 - **Elapsed is transcript JSONL mtime**, which only updates on message/tool completion (not during silent thinking). This is what makes it a stuck-detector.
 - **Toast AppId is registered in `HKCU:\SOFTWARE\Classes\AppUserModelId\Anthropic.ClaudeCode`** — Microsoft's documented way to register a standalone notifier without needing a Start Menu shortcut.
+- **Notification backends are platform-detected.** `hooks/notify.py` defines a `NotificationBackend` ABC with `WindowsBackend` / `MacOSBackend` / `LinuxBackend` implementations selected via `sys.platform`. Adding a new platform is one new class.
+- **The watcher polls externally**, free of Claude Code's repaint quirks. It scans `~/.claude/sessions/*.json` plus the matching transcript JSONLs in `~/.claude/projects/<encoded-cwd>/`, classifies each session, and beeps when severity *escalates* (debounced — won't beep continuously while a session sits in WAIT).
 
 ---
 
