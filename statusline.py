@@ -220,16 +220,21 @@ def _transcript_age(transcript: str | None) -> float | None:
 
 
 def render_status(state: dict | None, transcript: str | None) -> str:
+    """Single colored `●` whose color mirrors watcher.py's tray-icon severity:
+    green=BUSY, yellow=THINK (silent ≥60s), red=STUCK (≥180s) or WAIT (permission).
+    Permission prompts are visually loud in the TUI anyway, so a peripheral red
+    dot is enough — saves the line a text label.
+    """
     status = state.get("status") if state else None
     if status == "waiting":
-        return ansi("▶ WAIT", "1;31")
+        return ansi("●", "1;31")
     if status != "busy":
         return ""
     age = _transcript_age(transcript)
     if age is not None and age >= STUCK_THRESHOLD:
-        return ansi("⚠ STUCK", "1;31")
+        return ansi("●", "1;31")
     if age is not None and age >= SLOW_THRESHOLD:
-        return ansi("⌛ THINK", "1;33")
+        return ansi("●", "1;33")
     return ansi("●", "1;32")
 
 

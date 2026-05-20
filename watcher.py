@@ -17,6 +17,7 @@ Usage:
   python watcher.py --interval 1.0   # slower poll
   python watcher.py --no-sound       # don't beep on STUCK / WAIT transitions
   python watcher.py --sessions-dir <path>
+  python watcher.py --tray           # headless: system tray icon (Windows/macOS/Linux)
 
 Env vars:
   CLAUDE_SESSIONS_DIR    override sessions dir (same as --sessions-dir)
@@ -222,21 +223,119 @@ def diff_alerts(prev: dict[str, str], curr: dict[str, str]) -> list[str]:
     return escalated
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--interval", type=float, default=0.3,
-                    help="poll interval in seconds (default: 0.3)")
-    ap.add_argument("--sessions-dir", default=None,
-                    help="override sessions dir (default: $CLAUDE_SESSIONS_DIR or ~/.claude/sessions)")
-    ap.add_argument("--no-sound", action="store_true",
-                    help="do not beep on STUCK / WAIT transitions")
-    args = ap.parse_args()
+def overall_severity(sessions: list[SessionInfo]) -> str:
+    """Loudest severity across all sessions, for the tray icon color.
 
-    sessions_dir_str = args.sessions_dir or os.environ.get("CLAUDE_SESSIONS_DIR")
-    sessions_dir = Path(sessions_dir_str) if sessions_dir_str else (
-        Path.home() / ".claude" / "sessions"
+    alert > warn > normal-busy > idle. Empty session list → 'idle'.
+    """
+    severities = [classify(s)[2] for s in sessions]
+    if "alert" in severities:
+        return "alert"
+    if "warn" in severities:
+        return "warn"
+    if any(s.status == "busy" for s in sessions):
+        return "normal"
+    return "idle"
+
+
+def build_tooltip(sessions: list[SessionInfo]) -> str:
+    """Multi-line tray tooltip. Capped at 120 chars (Windows NotifyIcon limit)."""
+    if not sessions:
+        return "Claude Code · no sessions"
+    lines = ["Claude Code"]
+    for s in sessions:
+        label = classify(s)[0].strip()
+        proj = s.project[:18]
+        lines.append(f"{proj}: {label}")
+    return "\n".join(lines)[:120]
+
+
+def _make_icon_image(severity: str):
+    """Generate a colored circle icon for the tray. Lazy PIL import."""
+    from PIL import Image, ImageDraw
+    colors = {
+        "idle":   (158, 158, 158, 255),  # gray
+        "normal": (76, 175, 80, 255),    # green
+        "warn":   (255, 193, 7, 255),    # yellow
+        "alert":  (244, 67, 54, 255),    # red
+    }
+    color = colors.get(severity, colors["idle"])
+    size = 64
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.ellipse((6, 6, size - 6, size - 6), fill=color)
+    return img
+
+
+def run_tray(args, sessions_dir: Path) -> None:
+    """Headless mode: drive a system tray icon from the polling loop."""
+    try:
+        import pystray  # noqa: F401
+    except ImportError:
+        print("--tray requires the pystray package. Install with:")
+        print("  uv pip install --system pystray pillow")
+        print("  (or `pip install pystray pillow`)")
+        sys.exit(2)
+
+    import pystray
+    import threading
+
+    icons = {sev: _make_icon_image(sev) for sev in ("idle", "normal", "warn", "alert")}
+
+    stop_event = threading.Event()
+
+    def on_quit(icon, _item):
+        stop_event.set()
+        icon.stop()
+
+    def menu_items():
+        sessions = scan_sessions(sessions_dir)
+        items = []
+        for s in sessions:
+            label = classify(s)[0].strip()
+            items.append(pystray.MenuItem(f"{s.project}: {label}", None, enabled=False))
+        if items:
+            items.append(pystray.Menu.SEPARATOR)
+        items.append(pystray.MenuItem("Quit", on_quit))
+        return items
+
+    icon = pystray.Icon(
+        "claude-code-watcher",
+        icons["idle"],
+        "Claude Code · starting",
+        menu=pystray.Menu(lambda: menu_items()),
     )
 
+    def poll_loop():
+        prev_severity: dict[str, str] = {}
+        while not stop_event.is_set():
+            try:
+                sessions = scan_sessions(sessions_dir)
+                sev = overall_severity(sessions)
+                icon.icon = icons[sev]
+                icon.title = build_tooltip(sessions)
+
+                curr_severity = {
+                    s.session_id or f"pid{s.pid}": classify(s)[2] for s in sessions
+                }
+                if not args.no_sound:
+                    for _ in diff_alerts(prev_severity, curr_severity):
+                        beep()
+                prev_severity = curr_severity
+            except Exception:
+                # Never let a transient scan error kill the tray.
+                pass
+            stop_event.wait(args.interval)
+
+    def setup(icon):
+        icon.visible = True
+        threading.Thread(target=poll_loop, daemon=True).start()
+
+    print("Claude Code Watcher · tray icon active. Right-click → Quit to exit.")
+    icon.run(setup=setup)
+
+
+def run_tui(args, sessions_dir: Path) -> None:
     prev_severity: dict[str, str] = {}
     try:
         while True:
@@ -253,6 +352,29 @@ def main() -> None:
     except KeyboardInterrupt:
         print()
         sys.exit(0)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--interval", type=float, default=0.3,
+                    help="poll interval in seconds (default: 0.3)")
+    ap.add_argument("--sessions-dir", default=None,
+                    help="override sessions dir (default: $CLAUDE_SESSIONS_DIR or ~/.claude/sessions)")
+    ap.add_argument("--no-sound", action="store_true",
+                    help="do not beep on STUCK / WAIT transitions")
+    ap.add_argument("--tray", action="store_true",
+                    help="run headless with a system tray icon instead of the TUI table")
+    args = ap.parse_args()
+
+    sessions_dir_str = args.sessions_dir or os.environ.get("CLAUDE_SESSIONS_DIR")
+    sessions_dir = Path(sessions_dir_str) if sessions_dir_str else (
+        Path.home() / ".claude" / "sessions"
+    )
+
+    if args.tray:
+        run_tray(args, sessions_dir)
+    else:
+        run_tui(args, sessions_dir)
 
 
 if __name__ == "__main__":

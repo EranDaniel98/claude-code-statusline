@@ -27,11 +27,31 @@ When you run several Claude Code sessions in parallel terminals, it's easy to lo
 | Segment       | Meaning                                                                                     |
 |---------------|---------------------------------------------------------------------------------------------|
 | `project-name`| `session_name` if set, else `cwd` basename. Truncates with `…` to fit terminal width.       |
-| `●` / `⌛ THINK` / `⚠ STUCK` / `▶ WAIT` | Session classification. Green `●` = busy, transcript fresh. Yellow `⌛ THINK` = busy, transcript silent ≥60s. Red `⚠ STUCK` = silent ≥180s. Red `▶ WAIT` = permission prompt pending. Hidden = idle. Same thresholds as `watcher.py`. |
+| colored `●` | Session classification (color-only, matches tray icon). See [Status colors](#status-colors) for what each color means. Hidden = idle. |
 | `Opus 4.7 1M` | Model display name; `1M` suffix when 1M context is enabled.                                 |
 | `13% (131k)`  | Context used: percent + token count. Dim → yellow ≥60 → bold yellow ≥80 → red ≥90.          |
 | `5h:19% 7d:48%`| Rate-limit usage (5-hour / 7-day). Dim → yellow → red as it climbs.                        |
 | `last 12:34:56`| Local wall-clock time of the last transcript event. Dim if <30s old at last paint → yellow <2min → red ≥2min. Frozen between Claude Code repaints by design — comparing a stale wall clock to your own is self-evidently stale, whereas a frozen "Ns" counter would lie. Run `watcher.py` for real-time ticking. |
+
+### Status colors
+
+Both the statusline `●` and the tray icon share the same colors and thresholds.
+
+| Color | Name | Trigger | What to do |
+|---|---|---|---|
+| **Green `●`** | BUSY | Session is `busy` and the last non-thinking transcript entry is <60s old | Nothing — Claude is healthily working |
+| **Yellow `●`** | THINK | Busy, last non-thinking entry is ≥60s old | Wait — likely a long thinking block or a slow tool call. Heads-up, not yet a problem |
+| **Red `●`** | STUCK or WAIT | Either (a) busy + silent ≥180s, **or** (b) `status=waiting` (permission prompt pending) | Look at the Claude Code window. Permission dialog? Approve/deny. No dialog? Claude is probably hung — consider interrupting |
+| **Gray `●`** (tray only) | All idle | No sessions, or all sessions are `idle` | Nothing |
+| *no dot* (statusline only) | Idle | `status=idle` (turn finished, awaiting input) | Type your next prompt |
+
+**Thresholds**: `SLOW_THRESHOLD=60s` (yellow) and `STUCK_THRESHOLD=180s` (red), defined once in `watcher.py` and mirrored in `statusline.py` so the two surfaces never disagree.
+
+**"Last non-thinking entry"**: both surfaces walk the transcript JSONL backwards and skip `subtype=="thinking"` rows, so extended-thinking writes don't mask a session that's been silently reasoning. Falls back to file mtime if no parseable non-thinking entry exists (brand-new turn).
+
+**Where each color is computed**:
+- Statusline `●` — `statusline.py:render_status`, computed only when Claude Code repaints (events only; the `refreshInterval` timer does not fire during silent stretches).
+- Tray icon — `watcher.py:overall_severity`, computed every 300ms by the background poll loop, showing the loudest severity across all your Claude Code windows.
 
 The notification hook adds:
 
@@ -60,6 +80,32 @@ Run with:
 python watcher.py                 # default 300ms poll
 python watcher.py --no-sound      # silent
 python watcher.py --interval 1.0  # slower poll
+```
+
+### Tray-icon mode (no extra terminal pane)
+
+If you don't want the watcher TUI eating a terminal pane, run it headless with a system tray icon driven by the same classification logic:
+
+```bash
+uv venv .venv && uv pip install pystray pillow   # one-time, into the project venv
+.venv/Scripts/python watcher.py --tray           # Windows
+.venv/bin/python  watcher.py --tray              # macOS / Linux
+```
+
+Icon color reflects the loudest state across all sessions:
+
+| Color   | Meaning |
+|---------|---------|
+| Gray    | No sessions / all idle |
+| Green   | At least one `● BUSY`, none escalated |
+| Yellow  | At least one `⌛ THINK` |
+| Red     | At least one `⚠ STUCK` or `▶ WAIT` |
+
+Tooltip lists each session's classification; right-click → `Quit` to exit. Beeps on STUCK/WAIT escalations same as the TUI mode (use `--no-sound` to silence).
+
+On Windows, launch with `pythonw.exe` instead of `python.exe` to suppress the terminal window:
+```
+.venv/Scripts/pythonw watcher.py --tray
 ```
 
 ---

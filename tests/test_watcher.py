@@ -71,6 +71,39 @@ def main() -> None:
         ok = set(escalated) == {"a", "c"}
         results.append(ok)
         print(f"[{'PASS' if ok else 'FAIL'}] diff_alerts new escalations: {sorted(escalated)} (expected ['a','c'])")
+
+        # --- overall_severity ---
+        def mk(status, age=None):
+            return watcher.SessionInfo(pid=0, session_id="x", cwd="", status=status,
+                                       project="p", transcript_age=age)
+        cases = [
+            ([], "idle"),
+            ([mk("idle")], "idle"),
+            ([mk("busy", 1.0)], "normal"),
+            ([mk("busy", 1.0), mk("busy", 90.0)], "warn"),
+            ([mk("busy", 90.0), mk("waiting")], "alert"),
+            ([mk("busy", 1.0), mk("busy", 300.0)], "alert"),
+        ]
+        for sessions, expected in cases:
+            got = watcher.overall_severity(sessions)
+            ok = got == expected
+            results.append(ok)
+            print(f"[{'PASS' if ok else 'FAIL'}] overall_severity({[s.status+('@'+str(s.transcript_age) if s.transcript_age else '') for s in sessions]}) = {got} (expected {expected})")
+
+        # --- build_tooltip ---
+        tip = watcher.build_tooltip([])
+        ok = tip == "Claude Code · no sessions"
+        results.append(ok)
+        print(f"[{'PASS' if ok else 'FAIL'}] build_tooltip(no sessions) = {tip!r}")
+
+        tip = watcher.build_tooltip([mk("busy", 1.0), mk("waiting")])
+        ok = tip.startswith("Claude Code") and "BUSY" in tip and "WAIT" in tip
+        results.append(ok)
+        print(f"[{'PASS' if ok else 'FAIL'}] build_tooltip includes BUSY+WAIT: {tip!r}")
+
+        ok = len(tip) <= 120
+        results.append(ok)
+        print(f"[{'PASS' if ok else 'FAIL'}] build_tooltip length ≤120 (got {len(tip)})")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
