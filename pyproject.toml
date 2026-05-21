@@ -3,8 +3,8 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "claude-code-statusline"
-version = "0.3.0"
+name = "claude-watcher"
+version = "0.4.0"
 description = "Statusline + notification hook + cross-window tray watcher for Claude Code."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,12 +27,13 @@ dependencies = []
 tray = ["pystray>=0.19", "pillow>=9", "psutil>=5"]
 
 [project.scripts]
-claude-watcher = "watcher:main"
-claude-statusline = "statusline:main"
+claude-watcher = "claude_watcher.watcher:main"
+claude-statusline = "claude_watcher.statusline:main"
+claude-launch-watcher = "claude_watcher.launch_watcher:main"
 
 [project.urls]
 Homepage = "https://github.com/EranDaniel98/claude-code-statusline"
 Issues = "https://github.com/EranDaniel98/claude-code-statusline/issues"
 
-[tool.setuptools]
-py-modules = ["watcher", "statusline"]
+[tool.setuptools.packages.find]
+include = ["claude_watcher*"]

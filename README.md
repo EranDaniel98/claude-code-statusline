@@ -22,7 +22,7 @@ When you run several Claude Code sessions in parallel terminals, it's easy to lo
 
 ## What it looks like
 
-![Statusline showing project name, green busy dot, model, context %, rate limits, and elapsed time](docs/statusline.png)
+![Statusline showing project name, green busy dot, model, context %, rate limits, and elapsed time](https://raw.githubusercontent.com/EranDaniel98/claude-code-statusline/main/docs/statusline.png)
 
 | Segment       | Meaning                                                                                     |
 |---------------|---------------------------------------------------------------------------------------------|
@@ -59,7 +59,7 @@ The notification hook adds:
 - **Idle prompt** (turn ended, awaiting input) → chime + toast titled `[project] Awaiting your input`
 - **Elicitation dialog** → asterisk beep + toast titled `[project] Question`
 
-![Windows toast notification with Claude Code title and body](docs/toast.png)
+![Windows toast notification with Claude Code title and body](https://raw.githubusercontent.com/EranDaniel98/claude-code-statusline/main/docs/toast.png)
 
 The **external watcher** (`watcher.py`) is the answer to "is anything actually stuck?" — Claude Code refreshes the in-TUI statusline sparsely during silent work, so the dot can lie. Run the watcher in a separate terminal and it polls every session on its own schedule, flips sessions from `● BUSY` → `⌛ THINK` → `⚠ STUCK` as transcripts stay silent, and beeps when a session escalates to STUCK or WAIT:
 
@@ -87,9 +87,15 @@ python watcher.py --interval 1.0  # slower poll
 If you don't want the watcher TUI eating a terminal pane, run it headless with a system tray icon driven by the same classification logic:
 
 ```bash
-uv venv .venv && uv pip install pystray pillow   # one-time, into the project venv
-.venv/Scripts/python watcher.py --tray           # Windows
-.venv/bin/python  watcher.py --tray              # macOS / Linux
+pip install "claude-watcher[tray]"
+claude-watcher --tray
+```
+
+Or from a checkout (no install), using the same venv:
+
+```bash
+.venv/Scripts/python -m claude_watcher.watcher --tray   # Windows
+.venv/bin/python    -m claude_watcher.watcher --tray    # macOS / Linux
 ```
 
 The tray icon is a single colored circle whose color = the loudest severity across all your sessions (see [Status colors](#status-colors)).
@@ -113,36 +119,33 @@ Auto-refreshes every ~700ms while open; closes on focus-loss or `Esc`. Rendered 
 
 Register the tray watcher to launch automatically:
 
-**Windows:** writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\ClaudeCodeWatcher` pointing at a VBScript wrapper that invokes `pythonw.exe watcher.py --tray` with a hidden window (uv-built venvs ship `pythonw.exe` as a trampoline shim that flashes a console without the wrapper).
+**Windows:** writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\ClaudeCodeWatcher` pointing at a VBScript wrapper that invokes `pythonw.exe -m claude_watcher.watcher --tray` with a hidden window (uv-built venvs ship `pythonw.exe` as a trampoline shim that flashes a console without the wrapper).
 ```powershell
-.venv\Scripts\python watcher.py --install-autostart
+claude-watcher --install-autostart
 ```
 
 **macOS:** writes `~/Library/LaunchAgents/com.anthropic.claude-code-watcher.plist` and `launchctl load`s it immediately, so the watcher starts now and at every login. The watcher hides itself from the Dock via `NSApplicationActivationPolicyAccessory`; only the menu-bar icon shows.
 ```bash
-.venv/bin/python watcher.py --install-autostart
+claude-watcher --install-autostart
 ```
 First time the watcher fires a toast, macOS will prompt you to allow notifications for the Python interpreter (System Settings → Notifications). Grant it once.
 
 **Linux:** writes `~/.config/autostart/claude-code-watcher.desktop` (XDG autostart). Most desktop environments honor it on next login.
 ```bash
-.venv/bin/python watcher.py --install-autostart
+claude-watcher --install-autostart
 ```
 
-To remove on any platform: `python watcher.py --uninstall-autostart`.
+To remove on any platform: `claude-watcher --uninstall-autostart`.
 
 ### Auto-start when Claude opens (alternative to OS-login)
 
-If you'd rather the tray only run while you're actually using Claude — not idle in the background between reboots — register a Claude Code `SessionStart` hook instead. The hook fires when you open a Claude session; a tiny launcher (`hooks/launch_watcher.py`) checks via `psutil` whether a tray watcher is already alive and spawns one only if not. Subsequent session opens are no-ops.
+If you'd rather the tray only run while you're actually using Claude — not idle in the background between reboots — register a Claude Code `SessionStart` hook instead. The hook fires when you open a Claude session; a tiny launcher (`claude_watcher.launch_watcher`) checks via `psutil` whether a tray watcher is already alive and spawns one only if not. Subsequent session opens are no-ops.
 
-```powershell
-.venv\Scripts\python watcher.py --register-claude-hook   # Windows
-```
 ```bash
-.venv/bin/python watcher.py --register-claude-hook       # macOS / Linux
+claude-watcher --register-claude-hook
 ```
 
-This adds an entry under `hooks.SessionStart` in `~/.claude/settings.json` (with a `.bak` of the previous file). The command line uses the venv's Python path so the launcher can `import psutil`. Idempotent — re-running detects the existing entry and does nothing.
+This adds an entry under `hooks.SessionStart` in `~/.claude/settings.json` (with a `.bak` of the previous file). On Windows a small VBScript wrapper (`~/.claude/_claude_watcher_hook.vbs`) is generated so the launcher invocation is fully hidden; on macOS/Linux the command runs `python -m claude_watcher.launch_watcher` directly. Idempotent — re-running detects the existing entry and does nothing.
 
 | | OS-login autostart | SessionStart hook |
 |---|---|---|
@@ -151,11 +154,11 @@ This adds an entry under `hooks.SessionStart` in `~/.claude/settings.json` (with
 | Startup latency on first Claude open | None (already running) | ~300 ms (pystray spin-up) |
 | Setup command | `--install-autostart` | `--register-claude-hook` |
 
-Pick one. To remove the hook: `python watcher.py --unregister-claude-hook`.
+Pick one. To remove the hook: `claude-watcher --unregister-claude-hook`.
 
 ### Configurable thresholds
 
-Override the classification thresholds via env vars (same vars read by `statusline.py` so the two surfaces never disagree):
+Override the classification thresholds via env vars (same vars read by `claude_watcher.statusline` so the two surfaces never disagree):
 
 | Env var | Default | Effect |
 |---|---|---|
@@ -164,14 +167,14 @@ Override the classification thresholds via env vars (same vars read by `statusli
 
 ### Manual launch (without autostart)
 
-**Windows** — use `pythonw.exe` so no console window appears:
+**Windows** — use `pythonw.exe` (no console window):
 ```
-.venv\Scripts\pythonw watcher.py --tray
+pythonw -m claude_watcher.watcher --tray
 ```
 
-**macOS** — `python` is fine but you'll see a Dock icon while it runs. Either use `--install-autostart` (which hides the Dock icon) or run via `nohup` to detach from the terminal:
+**macOS** — `claude-watcher --tray` works but you'll see a Dock icon while it runs. Either use `--install-autostart` (which hides the Dock icon) or `nohup` to detach from the terminal:
 ```bash
-nohup .venv/bin/python watcher.py --tray > /dev/null 2>&1 &
+nohup claude-watcher --tray > /dev/null 2>&1 &
 ```
 
 **Linux** — same `nohup` pattern as macOS, or use `systemctl --user` for a real service.
@@ -190,7 +193,17 @@ nohup .venv/bin/python watcher.py --tray > /dev/null 2>&1 &
 
 ## Install
 
-### Automated (Windows, recommended)
+### Via pip (recommended)
+
+```bash
+pip install "claude-watcher[tray]"          # tray extras pull pystray + pillow + psutil
+claude-statusline --help                    # entry-point script for the statusline
+claude-watcher --tray                       # entry-point script for the tray watcher
+```
+
+Then point Claude Code's `statusLine.command` at `claude-statusline` instead of `python ~/.claude/statusline.py`. To set up auto-start, run `claude-watcher --install-autostart` (OS-login) or `claude-watcher --register-claude-hook` (start on Claude session open) — see [Autostart on login](#autostart-on-login) for the OS-specific details.
+
+### Automated (Windows, git checkout, legacy)
 
 ```powershell
 git clone https://github.com/EranDaniel98/claude-code-statusline.git

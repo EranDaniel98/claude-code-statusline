@@ -457,8 +457,16 @@ def is_snoozed(cfg: dict, session_id: str) -> bool:
 
 
 def _watcher_launch_vbs_path() -> Path:
-    """Path to the VBS launcher dropped next to watcher.py."""
-    return Path(__file__).resolve().parent / "_claude_code_watcher_launch.vbs"
+    """Where the watcher's VBS launcher lives. User data dir so we don't
+    write inside the (pip-installed) package directory."""
+    return Path.home() / ".claude" / "_claude_watcher_launch.vbs"
+
+
+def _hook_launch_vbs_path() -> Path:
+    """Sibling VBS used by the SessionStart hook to launch
+    launch_watcher silently. Separate file so we don't have to deal with
+    nested-quoting WScript args."""
+    return Path.home() / ".claude" / "_claude_watcher_hook.vbs"
 
 
 def _write_launch_vbs() -> Path:
@@ -466,14 +474,25 @@ def _write_launch_vbs() -> Path:
     window. Required because uv-built venvs ship `pythonw.exe` as a
     trampoline shim that still flashes a console; wscript + WshShell.Run
     style=0 forces a truly hidden window regardless of the target."""
-    py = Path(sys.executable)
-    pyw = py.with_name("pythonw.exe")
-    if pyw.exists():
-        py = pyw
-    script_path = Path(__file__).resolve()
+    py = _venv_python_path(prefer_windowless=True)
     vbs_path = _watcher_launch_vbs_path()
-    # Inner Run arg is the command line for WshShell — quote each path.
-    inner = f'""{py}"" ""{script_path}"" --tray'
+    vbs_path.parent.mkdir(parents=True, exist_ok=True)
+    inner = f'""{py}"" -m claude_watcher.watcher --tray'
+    body = (
+        'Set WshShell = CreateObject("WScript.Shell")\r\n'
+        f'WshShell.Run "{inner}", 0, False\r\n'
+    )
+    vbs_path.write_text(body, encoding="utf-8")
+    return vbs_path
+
+
+def _write_hook_launch_vbs() -> Path:
+    """Same idea as _write_launch_vbs but for the SessionStart hook —
+    runs launch_watcher.py silently, which then spawns the watcher."""
+    py = _venv_python_path(prefer_windowless=True)
+    vbs_path = _hook_launch_vbs_path()
+    vbs_path.parent.mkdir(parents=True, exist_ok=True)
+    inner = f'""{py}"" -m claude_watcher.launch_watcher'
     body = (
         'Set WshShell = CreateObject("WScript.Shell")\r\n'
         f'WshShell.Run "{inner}", 0, False\r\n'
@@ -486,9 +505,9 @@ def _watcher_launch_command() -> str:
     """Command line registered in HKCU\\…\\Run. Goes through wscript so
     the launch is truly windowless even with uv's trampoline pythonw."""
     if sys.platform == "win32":
-        vbs = _watcher_launch_vbs_path()
-        return f'wscript.exe "{vbs}"'
-    return f'"{sys.executable}" "{Path(__file__).resolve()}" --tray'
+        return f'wscript.exe "{_watcher_launch_vbs_path()}"'
+    py = _venv_python_path()
+    return f'"{py}" -m claude_watcher.watcher --tray'
 
 
 def _autostart_install_windows() -> int:
@@ -545,7 +564,8 @@ def _autostart_install_macos() -> int:
   <key>ProgramArguments</key>
   <array>
     <string>{sys.executable}</string>
-    <string>{Path(__file__).resolve()}</string>
+    <string>-m</string>
+    <string>claude_watcher.watcher</string>
     <string>--tray</string>
   </array>
   <key>RunAtLoad</key><true/>
@@ -591,21 +611,15 @@ def _autostart_uninstall_macos() -> int:
 
 
 def _venv_python_path(prefer_windowless: bool = False) -> str:
-    """Return the venv's Python next to watcher.py, or sys.executable.
-    When `prefer_windowless` is set on Windows, prefer pythonw.exe so the
+    """Path to a Python executable in the current environment, preferring
+    pythonw.exe on Windows when `prefer_windowless` is set so the
     invoking process doesn't flash a console window."""
-    project_root = Path(__file__).resolve().parent
-    if sys.platform == "win32":
-        cands = []
-        if prefer_windowless:
-            cands.append(project_root / ".venv" / "Scripts" / "pythonw.exe")
-        cands.append(project_root / ".venv" / "Scripts" / "python.exe")
-    else:
-        cands = [project_root / ".venv" / "bin" / "python"]
-    for c in cands:
-        if c.exists():
-            return str(c)
-    return sys.executable
+    py = Path(sys.executable)
+    if sys.platform == "win32" and prefer_windowless:
+        pyw = py.with_name("pythonw.exe")
+        if pyw.exists():
+            return str(pyw)
+    return str(py)
 
 
 def _claude_settings_path() -> Path:
@@ -614,29 +628,27 @@ def _claude_settings_path() -> Path:
 
 def _claude_hook_command() -> str:
     """Quoted command string to put in settings.json hooks.SessionStart.
-    Uses pythonw on Windows so Claude Code firing the hook doesn't
-    briefly flash a console window every session open."""
-    py = _venv_python_path(prefer_windowless=True)
-    script = Path(__file__).resolve().parent / "hooks" / "launch_watcher.py"
-    return f'"{py}" "{script}"'
+    On Windows we route through a VBS wrapper so neither the launcher
+    nor the spawned watcher flashes a console window."""
+    if sys.platform == "win32":
+        return f'wscript.exe "{_hook_launch_vbs_path()}"'
+    py = _venv_python_path()
+    return f'"{py}" -m claude_watcher.launch_watcher'
 
 
 def _claude_hook_install() -> int:
     """Add a SessionStart hook to ~/.claude/settings.json that launches
     the tray watcher (idempotently) when Claude opens a session."""
     settings_path = _claude_settings_path()
-    script = Path(__file__).resolve().parent / "hooks" / "launch_watcher.py"
-    if not script.exists():
-        print(f"launch script missing: {script}", file=sys.stderr)
-        return 1
 
-    # On Windows, ensure the VBS launcher exists so launch_watcher.py can
-    # spawn the watcher fully-hidden even with uv's trampoline pythonw.
+    # On Windows, generate the two VBS launchers (one for the hook, one
+    # for the watcher) so the whole chain stays fully hidden.
     if sys.platform == "win32":
         try:
+            _write_hook_launch_vbs()
             _write_launch_vbs()
         except Exception as e:
-            print(f"warning: could not generate VBS launcher: {e}", file=sys.stderr)
+            print(f"warning: could not generate VBS launchers: {e}", file=sys.stderr)
 
     command = _claude_hook_command()
 
@@ -686,7 +698,14 @@ def _claude_hook_uninstall() -> int:
         print(f"could not parse {settings_path}: {e}", file=sys.stderr)
         return 1
 
-    script_str = str(Path(__file__).resolve().parent / "hooks" / "launch_watcher.py")
+    # Markers that identify our hook regardless of whether settings
+    # was written by the current code path or an older one (which used
+    # the in-repo hooks/launch_watcher.py path).
+    markers = [
+        "claude_watcher.launch_watcher",
+        "_claude_watcher_hook.vbs",
+        "launch_watcher.py",
+    ]
     hooks = settings.get("hooks") or {}
     session_start = hooks.get("SessionStart") or []
     removed = 0
@@ -694,7 +713,8 @@ def _claude_hook_uninstall() -> int:
     for entry in session_start:
         new_hooks = []
         for h in entry.get("hooks", []) or []:
-            if script_str in (h.get("command") or ""):
+            cmd = h.get("command") or ""
+            if any(m in cmd for m in markers):
                 removed += 1
                 continue
             new_hooks.append(h)
@@ -716,6 +736,15 @@ def _claude_hook_uninstall() -> int:
 
     settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
     print(f"Removed {removed} hook entry/entries from {settings_path}")
+    # Clean up the hook VBS on Windows. Leave the watcher VBS alone —
+    # OS-login autostart may still be using it.
+    if sys.platform == "win32":
+        hook_vbs = _hook_launch_vbs_path()
+        if hook_vbs.exists():
+            try:
+                hook_vbs.unlink()
+            except OSError:
+                pass
     return 0
 
 
@@ -726,7 +755,7 @@ def _autostart_install_linux() -> int:
     body = f"""[Desktop Entry]
 Type=Application
 Name=Claude Code Watcher
-Exec={sys.executable} {Path(__file__).resolve()} --tray
+Exec={sys.executable} -m claude_watcher.watcher --tray
 X-GNOME-Autostart-enabled=true
 """
     desktop_path.write_text(body, encoding="utf-8")

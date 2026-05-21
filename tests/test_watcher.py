@@ -18,7 +18,7 @@ except Exception:
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-import watcher  # noqa: E402
+from claude_watcher import watcher  # noqa: E402
 
 
 def make_session(d: Path, status: str, session_id: str | None = None) -> str:

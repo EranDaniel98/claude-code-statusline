@@ -24,7 +24,6 @@ except Exception:
     pass
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-STATUSLINE = REPO_ROOT / "statusline.py"
 SESSIONS = Path(tempfile.mkdtemp(prefix="ccs-test-sessions-"))
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -41,8 +40,9 @@ def render(payload, columns=None) -> str:
     elif "COLUMNS" in env:
         del env["COLUMNS"]
     body = json.dumps(payload) if isinstance(payload, dict) else payload
+    env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
     r = subprocess.run(
-        [sys.executable, str(STATUSLINE)],
+        [sys.executable, "-m", "claude_watcher.statusline"],
         input=body, capture_output=True, text=True, env=env,
         encoding="utf-8", errors="replace",
     )
