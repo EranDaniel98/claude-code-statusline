@@ -1,0 +1,34 @@
+name: Publish to TestPyPI
+
+# Manual trigger so you can dry-run a release against TestPyPI before
+# tagging for the real PyPI publish. Same OIDC Trusted Publisher
+# pattern; configure separately on TestPyPI:
+#   https://test.pypi.org/manage/account/publishing/
+#   environment: testpypi (matches the `environment:` key below)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - run: uv build
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/
+          print-hash: true

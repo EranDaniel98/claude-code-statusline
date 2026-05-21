@@ -1,0 +1,64 @@
+name: Publish to PyPI
+
+# Fires when a tag matching v*.*.* is pushed (e.g. `git tag v0.4.0 && git push --tags`).
+# Build runs unconditionally; the publish job uses OIDC against PyPI's Trusted
+# Publisher so no API token lives in repo secrets. One-time setup on PyPI:
+#   https://pypi.org/manage/account/publishing/
+#   project name: claude-watcher | owner: EranDaniel98
+#   repo: claude-code-statusline | workflow: publish.yml | environment: pypi
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Sanity check — version in pyproject matches the tag
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          ver=$(grep -oP '^version\s*=\s*"\K[^"]+' pyproject.toml)
+          echo "tag=$tag  pyproject=$ver"
+          [ "$tag" = "$ver" ] || { echo "::error::tag $tag != pyproject version $ver"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI (OIDC, no token)
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # required for PyPI's Trusted Publisher OIDC exchange
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # No `password:` — OIDC handles auth against PyPI.
+          # Default repository-url is real PyPI; TestPyPI uses the
+          # workflow_dispatch path in publish-testpypi.yml.
+          packages-dir: dist/
+          print-hash: true
