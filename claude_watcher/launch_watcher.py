@@ -16,7 +16,29 @@ never observed in practice.
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
+
+
+def _drain_stdin_with_timeout(seconds: float = 0.2) -> None:
+    """Read stdin in a daemon thread; abandon after `seconds`.
+
+    Claude Code's hook pipeline pipes a JSON payload that arrives
+    instantly, so this returns quickly in the normal path. When the
+    launcher is invoked via wscript (which doesn't attach stdin to
+    anything useful), the read would otherwise hang forever — the
+    timeout bounds that pathological case.
+    """
+    done = threading.Event()
+    def _reader():
+        try:
+            sys.stdin.read()
+        except Exception:
+            pass
+        finally:
+            done.set()
+    threading.Thread(target=_reader, daemon=True).start()
+    done.wait(seconds)
 
 
 def _watcher_already_running() -> bool:
@@ -53,11 +75,10 @@ def _watcher_launch_vbs() -> Path:
 
 
 def main() -> None:
-    # Drain stdin so Claude Code's hook pipeline doesn't block on a full pipe.
-    try:
-        sys.stdin.read()
-    except Exception:
-        pass
+    # Drain stdin so Claude Code's hook pipeline doesn't block on a full
+    # pipe. Bounded with a timeout so a stdin-less invocation (wscript)
+    # can't hang the launcher.
+    _drain_stdin_with_timeout()
 
     if _watcher_already_running():
         return
