@@ -38,12 +38,13 @@ jobs:
         run: python -m py_compile scripts/merge_settings.py
 
       - name: Smoke-test merge_settings.py
+        shell: bash
         run: |
-          python -c "
+          python << 'EOF'
           import json, pathlib, subprocess, sys, tempfile
           tmp = pathlib.Path(tempfile.mkdtemp())
           settings = tmp / 'settings.json'
-          settings.write_text('{\"existing\":\"keep\"}', encoding='utf-8')
+          settings.write_text('{"existing":"keep"}', encoding='utf-8')
           subprocess.run(
               [sys.executable, 'scripts/merge_settings.py',
                'settings.example.json', '--settings', str(settings)],
@@ -54,4 +55,4 @@ jobs:
           assert 'statusLine' in d, d
           assert 'Notification' in d['hooks'], d
           print('merge ok')
-          "
+          EOF
