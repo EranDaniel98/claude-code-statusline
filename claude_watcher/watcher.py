@@ -143,10 +143,17 @@ _cpu_proc_cache: dict[int, object] = {}
 
 
 def session_cpu_percent(pid: int) -> float | None:
-    """CPU% for the process `pid` (claude.exe). Returns None on first call
-    for a given pid (psutil needs two samples to compute a delta) and on
-    any error. May exceed 100% on multi-core systems; that's informative,
-    not a bug — clamp at display time if you care."""
+    """CPU% for the process `pid` (claude.exe) as a fraction of total
+    machine CPU (0..100%, not 0..N*100%). Returns None on first call
+    for a given pid (psutil needs two samples to compute a delta) and
+    on any error.
+
+    psutil's Process.cpu_percent is process-wide and can exceed 100% on
+    multi-core systems (one process running on multiple cores). We
+    divide by logical core count so the number stays in 0..100% range
+    and reads as "how much of the whole machine Claude is using" —
+    more intuitive than the raw multi-core number.
+    """
     if not _HAS_PSUTIL or pid <= 0:
         return None
     import psutil
@@ -157,7 +164,8 @@ def session_cpu_percent(pid: int) -> float | None:
             _cpu_proc_cache[pid] = p
             p.cpu_percent()  # priming sample; first real read is on next call
             return None
-        return p.cpu_percent()
+        cores = psutil.cpu_count(logical=True) or 1
+        return p.cpu_percent() / cores
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         _cpu_proc_cache.pop(pid, None)
         return None
