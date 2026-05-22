@@ -29,8 +29,10 @@ jobs:
       - name: Run watcher tests
         run: python tests/test_watcher.py
 
-      - name: Smoke-import notify.py
-        run: python -c "import importlib.util, sys; spec = importlib.util.spec_from_file_location('notify', 'hooks/notify.py'); mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); print('backend:', type(mod.get_backend()).__name__)"
+      - name: Smoke-import notify
+        run: python -c "from claude_watcher import notify; print('backend:', type(notify.get_backend()).__name__)"
+        env:
+          PYTHONPATH: .
 
       - name: Lint merge_settings.py
         run: python -m py_compile scripts/merge_settings.py
