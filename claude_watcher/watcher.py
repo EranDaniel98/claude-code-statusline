@@ -41,6 +41,39 @@ except Exception:
 # Defaults match the historical 60s/180s behavior.
 SLOW_THRESHOLD = float(os.environ.get("CLAUDE_WATCHER_SLOW_SECONDS", "60"))
 STUCK_THRESHOLD = float(os.environ.get("CLAUDE_WATCHER_STUCK_SECONDS", "180"))
+
+
+# --- Structured logging ---------------------------------------------------
+# Single append-only JSONL file at ~/.claude/claude-watcher.log. Rotates
+# when it crosses _LOG_MAX_BYTES (one backup at .bak). Best-effort: every
+# write is wrapped — logging must never break the watcher itself.
+
+import threading as _threading
+_LOG_PATH = Path.home() / ".claude" / "claude-watcher.log"
+_LOG_MAX_BYTES = 1_000_000
+_LOG_LOCK = _threading.Lock()
+
+
+def _log(event: str, level: str = "INFO", **fields) -> None:
+    """Append one JSON line to the log file. Silent on failure."""
+    try:
+        with _LOG_LOCK:
+            try:
+                if _LOG_PATH.exists() and _LOG_PATH.stat().st_size > _LOG_MAX_BYTES:
+                    _LOG_PATH.replace(_LOG_PATH.with_suffix(".log.bak"))
+            except OSError:
+                pass
+            _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            entry = {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "level": level,
+                "event": event,
+                **fields,
+            }
+            with _LOG_PATH.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, default=str) + "\n")
+    except Exception:
+        pass
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 
@@ -529,6 +562,7 @@ def _autostart_install_windows() -> int:
             0, winreg.KEY_SET_VALUE,
         ) as k:
             winreg.SetValueEx(k, _AUTOSTART_NAME, 0, winreg.REG_SZ, cmd)
+        _log("autostart_install", os="windows", method="run_key", name=_AUTOSTART_NAME)
         print(f"Installed autostart (HKCU…\\Run\\{_AUTOSTART_NAME}):")
         print(f"  {cmd}")
         print(f"Launcher: {vbs}")
@@ -548,6 +582,7 @@ def _autostart_uninstall_windows() -> int:
         ) as k:
             try:
                 winreg.DeleteValue(k, _AUTOSTART_NAME)
+                _log("autostart_uninstall", os="windows", name=_AUTOSTART_NAME)
                 print(f"Removed autostart (HKCU…\\Run\\{_AUTOSTART_NAME})")
             except FileNotFoundError:
                 print("No autostart entry to remove.")
@@ -582,6 +617,7 @@ def _autostart_install_macos() -> int:
 </plist>
 """
     plist_path.write_text(plist, encoding="utf-8")
+    _log("autostart_install", os="macos", method="launchd_plist", path=str(plist_path))
     print(f"Installed autostart plist: {plist_path}")
     # Try to load it now so it starts immediately and survives reboot.
     import subprocess
@@ -612,6 +648,7 @@ def _autostart_uninstall_macos() -> int:
         except Exception:
             pass
         plist_path.unlink()
+        _log("autostart_uninstall", os="macos", path=str(plist_path))
         print(f"Removed: {plist_path}")
     else:
         print("No autostart plist to remove.")
@@ -690,6 +727,7 @@ def _claude_hook_install() -> int:
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
 
+    _log("hook_register", command=command, settings=str(settings_path))
     print(f"Registered SessionStart hook in {settings_path}")
     print(f"  {command}")
     return 0
@@ -743,6 +781,7 @@ def _claude_hook_uninstall() -> int:
             settings.pop("hooks", None)
 
     settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    _log("hook_unregister", removed=removed, settings=str(settings_path))
     print(f"Removed {removed} hook entry/entries from {settings_path}")
     # Clean up the hook VBS on Windows. Leave the watcher VBS alone —
     # OS-login autostart may still be using it.
@@ -767,6 +806,7 @@ Exec={sys.executable} -m claude_watcher.watcher --tray
 X-GNOME-Autostart-enabled=true
 """
     desktop_path.write_text(body, encoding="utf-8")
+    _log("autostart_install", os="linux", method="xdg_desktop", path=str(desktop_path))
     print(f"Installed autostart: {desktop_path}")
     return 0
 
@@ -775,6 +815,7 @@ def _autostart_uninstall_linux() -> int:
     desktop_path = Path.home() / ".config" / "autostart" / "claude-code-watcher.desktop"
     if desktop_path.exists():
         desktop_path.unlink()
+        _log("autostart_uninstall", os="linux", path=str(desktop_path))
         print(f"Removed: {desktop_path}")
     else:
         print("No autostart .desktop to remove.")
@@ -809,6 +850,7 @@ def run_tray(args, sessions_dir: Path) -> None:
     stop_event = threading.Event()
 
     def on_quit(icon, _item):
+        _log("tray_quit")
         stop_event.set()
         icon.stop()
 
@@ -834,18 +876,21 @@ def run_tray(args, sessions_dir: Path) -> None:
         state["theme"] = "dark" if state["theme"] != "dark" else "light"
         cfg["theme"] = state["theme"]
         _save_config(cfg)
+        _log("theme_toggle", theme=state["theme"])
         icon.update_menu()
 
     def toggle_pin(icon, _item):
         state["pinned"] = not state["pinned"]
         cfg["pin_flyout"] = state["pinned"]
         _save_config(cfg)
+        _log("pin_toggle", pinned=state["pinned"])
         icon.update_menu()
 
     def do_snooze(session_id: str, seconds: int):
         def handler(icon, _item):
             cfg.setdefault("snoozed", {})[session_id] = time.time() + seconds
             _save_config(cfg)
+            _log("snooze", session=session_id[:8], minutes=seconds // 60)
             icon.update_menu()
         return handler
 
@@ -855,6 +900,7 @@ def run_tray(args, sessions_dir: Path) -> None:
             if isinstance(snoozed, dict):
                 snoozed.pop(session_id, None)
                 _save_config(cfg)
+                _log("unsnooze", session=session_id[:8])
                 icon.update_menu()
         return handler
 
@@ -915,16 +961,21 @@ def run_tray(args, sessions_dir: Path) -> None:
                     if s is None:
                         continue
                     if is_snoozed(cfg, s.session_id):
+                        _log("escalation_suppressed_snoozed", session=s.session_id[:8])
                         continue
                     label = "WAIT" if s.status == "waiting" else "STUCK"
+                    _log("escalation", session=s.session_id[:8],
+                         project=s.project, state=label,
+                         age=round(s.transcript_age, 1) if s.transcript_age else None)
                     _toast(f"[{s.project}] {label}",
                            "Permission needed" if label == "WAIT" else "Session silent ≥3 min")
                     if not args.no_sound:
                         beep()
                 prev_severity = curr_severity
-            except Exception:
+            except Exception as e:
                 # Never let a transient scan error kill the tray.
-                pass
+                _log("poll_loop_error", level="ERROR", exc=str(e),
+                     exc_type=type(e).__name__)
             stop_event.wait(args.interval)
 
     def setup(icon):
@@ -942,6 +993,8 @@ def run_tray(args, sessions_dir: Path) -> None:
                 pass
         threading.Thread(target=poll_loop, daemon=True).start()
 
+    _log("tray_start", theme=state["theme"], pinned=state["pinned"],
+         interval=args.interval, platform=sys.platform)
     print("Claude Code Watcher · tray icon active. Double-click for info, right-click → Quit.")
     icon.run(setup=setup)
 

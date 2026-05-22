@@ -80,8 +80,17 @@ def main() -> None:
     # can't hang the launcher.
     _drain_stdin_with_timeout()
 
+    # Import lazily so a missing watcher module doesn't break the import
+    # chain. Falls back to a no-op log.
+    try:
+        from .watcher import _log
+    except Exception:
+        def _log(*a, **k): pass
+
     if _watcher_already_running():
+        _log("launch_skipped", reason="already_running")
         return
+    _log("launch_spawning")
 
     if sys.platform == "win32":
         vbs = _watcher_launch_vbs()

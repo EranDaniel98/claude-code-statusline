@@ -29,6 +29,9 @@ jobs:
       - name: Run watcher tests
         run: python tests/test_watcher.py
 
+      - name: Run install-flow tests
+        run: python tests/test_install_flows.py
+
       - name: Smoke-import notify
         run: python -c "from claude_watcher import notify; print('backend:', type(notify.get_backend()).__name__)"
         env:

@@ -185,10 +185,11 @@ def main() -> None:
     if os.environ.get("CLAUDE_QUIET"):
         return
 
+    raw_stdin = sys.stdin.read()
     try:
-        data = json.loads(sys.stdin.read() or "{}")
+        data = json.loads(raw_stdin or "{}")
     except json.JSONDecodeError:
-        return
+        data = {}
 
     message = data.get("message") or ""
     notif_type = data.get("notification_type") or data.get("type") or ""
@@ -196,6 +197,18 @@ def main() -> None:
     project = os.path.basename(cwd.rstrip("\\/")) or "Claude"
 
     kind = classify(message, notif_type)
+
+    # Log the full inbound payload to the structured log so spurious
+    # toasts (e.g. "Awaiting your input" when the user wasn't actually
+    # idle) can be diagnosed — every payload Claude Code sends ends up
+    # here with its `kind` classification, raw message, and all fields.
+    try:
+        from .watcher import _log
+        _log("notify_fired", kind=kind, project=project,
+             message=message[:200], notif_type=notif_type,
+             keys=sorted(data.keys()) if isinstance(data, dict) else None)
+    except Exception:
+        pass
 
     titles = {
         "permission_prompt": f"[{project}] Permission needed",
