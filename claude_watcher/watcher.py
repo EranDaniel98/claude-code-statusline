@@ -556,10 +556,13 @@ def _autostart_install_windows() -> int:
         vbs = _write_launch_vbs()
         cmd = _watcher_launch_command()
         import winreg
-        with winreg.OpenKey(
+        # CreateKey instead of OpenKey: returns the existing key if present
+        # OR creates it if missing. The Run key normally exists on any logged-in
+        # user, but on bare/test environments (CI runners, fresh accounts) it
+        # sometimes isn't there yet and OpenKey raises FileNotFoundError.
+        with winreg.CreateKey(
             winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Run",
-            0, winreg.KEY_SET_VALUE,
         ) as k:
             winreg.SetValueEx(k, _AUTOSTART_NAME, 0, winreg.REG_SZ, cmd)
         _log("autostart_install", os="windows", method="run_key", name=_AUTOSTART_NAME)
