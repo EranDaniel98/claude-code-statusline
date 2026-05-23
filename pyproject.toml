@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-watcher"
-version = "0.4.1"
+version = "0.4.2"
 description = "Statusline + notification hook + cross-window tray watcher for Claude Code."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,6 +30,7 @@ tray = ["pystray>=0.19", "pillow>=9", "psutil>=5"]
 claude-watcher = "claude_watcher.watcher:main"
 claude-statusline = "claude_watcher.statusline:main"
 claude-launch-watcher = "claude_watcher.launch_watcher:main"
+claude-notify = "claude_watcher.notify:main"
 
 [project.urls]
 Homepage = "https://github.com/EranDaniel98/claude-code-statusline"

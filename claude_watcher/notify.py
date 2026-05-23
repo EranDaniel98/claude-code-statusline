@@ -182,9 +182,6 @@ def get_backend() -> NotificationBackend:
 
 
 def main() -> None:
-    if os.environ.get("CLAUDE_QUIET"):
-        return
-
     raw_stdin = sys.stdin.read()
     try:
         data = json.loads(raw_stdin or "{}")
@@ -202,13 +199,20 @@ def main() -> None:
     # toasts (e.g. "Awaiting your input" when the user wasn't actually
     # idle) can be diagnosed — every payload Claude Code sends ends up
     # here with its `kind` classification, raw message, and all fields.
+    # Logged BEFORE the CLAUDE_QUIET return so we capture invocations
+    # even when toast output is suppressed.
+    quiet = bool(os.environ.get("CLAUDE_QUIET"))
     try:
         from .watcher import _log
         _log("notify_fired", kind=kind, project=project,
              message=message[:200], notif_type=notif_type,
+             quiet=quiet,
              keys=sorted(data.keys()) if isinstance(data, dict) else None)
     except Exception:
         pass
+
+    if quiet:
+        return
 
     titles = {
         "permission_prompt": f"[{project}] Permission needed",
